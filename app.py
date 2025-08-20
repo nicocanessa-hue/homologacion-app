@@ -1,4 +1,6 @@
-# app.py — Especificación · Incisos 1–6 (fix columnas duplicadas en inciso 5)
+# app.py — Especificación · Incisos 1–6 (Micotoxinas)
+# 1) Descripción  2) Composición  3) Organolépticos  4) Físico‑químicos
+# 5) Microbiológicos  6) Micotoxinas
 
 import re
 import unicodedata
@@ -11,7 +13,7 @@ from docx.table import _Cell, Table as _Table
 from docx.text.paragraph import Paragraph
 
 st.set_page_config(page_title="Especificación · Incisos 1–6", page_icon="📄", layout="centered")
-st.title("Especificación · 1) Descripción · 2) Composición · 3) Organolépticos · 4) Físico‑químicos · 5) Microbiológicos · 6) Empaque y Rotulado")
+st.title("Especificación · 1) Descripción · 2) Composición · 3) Organolépticos · 4) Físico‑químicos · 5) Microbiológicos · 6) Micotoxinas")
 
 # ---------------- Utils base ----------------
 def nrm(s: str) -> str:
@@ -49,7 +51,7 @@ def make_unique(cols):
     return out
 
 def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Asegura encabezados únicos (Col, Col_1, Col_2...)."""
+    """Garantiza encabezados únicos (Col, Col_1, Col_2...)."""
     new = []
     seen = {}
     for c in df.columns:
@@ -260,7 +262,6 @@ def normalize_microbiologicos(df: pd.DataFrame) -> pd.DataFrame:
         cl = nrm(col)
         return any(tok in cl for tok in tokens)
 
-    # Map flexible para columnas típicas
     map_cols = {}
     for c in df.columns:
         if has_token(c, ["parámetro","parametro","microorganismo"]): map_cols[c] = "PARÁMETRO"
@@ -303,39 +304,48 @@ def extraer_microbiologicos(docx_file) -> list[pd.DataFrame]:
             return [normalize_microbiologicos(t) for t in tablas]
     return []
 
-# ---------------- Inciso 6 (Empaque y Rotulado) ----------------
-ETI_KEYS = [
-    "empaque y rotulado","etiquetado","envase y rotulado","condiciones de envasado",
-    "rotulado","empaque","envase","embalaje"
-]
+# ---------------- Inciso 6 (Micotoxinas) ----------------
+def normalize_micotoxinas(df: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza tabla de micotoxinas (mapeo flexible: micotoxina, límite, norma/método, periodicidad, CoA)."""
+    if df is None or df.empty:
+        return df
 
-def parse_key_value_lines(lines: list[str]) -> pd.DataFrame:
-    rows = []
-    for ln in lines:
-        m = re.match(r"\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-/().% 0-9]+?)\s*[:：]\s*(.+)$", ln)
-        if m:
-            rows.append({"Campo": m.group(1).strip(), "Valor": m.group(2).strip()})
-    return pd.DataFrame(rows)
+    def pick_col(keys):
+        for c in df.columns:
+            if any(k in nrm(c) for k in keys):
+                return c
+        return None
 
-def extraer_empaque_rotulado(docx_file) -> pd.DataFrame:
-    for key in ETI_KEYS:
-        tablas = extraer_bloque_mixto_tablas(docx_file, nrm(key), multihdr=False)
+    out = pd.DataFrame(index=df.index)
+
+    c_micro = pick_col(["micotoxina","aflatox","ocratox","don","zeara","toxina"])
+    c_lim   = pick_col(["límite","limite","max","ppm","ppb","µg","ug","mg/kg","μg/kg"])
+    c_norma = pick_col(["norma","referencia","reglament","metodo","método","iso","hplc","lc-ms"])
+    c_per   = pick_col(["periodicidad de control","frecuencia","periodicidad"])
+    c_coa   = pick_col(["coa (sí/no)","coa (si/no)","coa"])
+
+    if c_micro: out["MICOTOXINA"] = df[c_micro]
+    else:
+        # si no hay columna clara, usar primera
+        out["MICOTOXINA"] = df.iloc[:,0]
+
+    if c_lim:   out["LÍMITE"] = df[c_lim]
+    if c_norma: out["NORMA / MÉTODO"] = df[c_norma]
+    if c_per:   out["PERIODICIDAD DE CONTROL"] = df[c_per]
+    if c_coa:   out["CoA (Sí/No)"] = df[c_coa]
+
+    order = [c for c in ["MICOTOXINA","LÍMITE","NORMA / MÉTODO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"] if c in out.columns]
+    out = out[order]
+    out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
+    return dedupe_columns(out)
+
+def extraer_micotoxinas(docx_file) -> list[pd.DataFrame]:
+    keys = ["micotoxinas","micotoxina"]
+    for k in keys:
+        tablas = extraer_bloque_mixto_tablas(docx_file, nrm(k), multihdr=True)
         if tablas:
-            dfs = []
-            for t in tablas:
-                t = t.loc[:, ~t.columns.duplicated()]
-                dfs.append(t)
-            cat = pd.concat(dfs, ignore_index=True)
-            return dedupe_columns(cat)
-
-    for key in ETI_KEYS:
-        bloque = extraer_bloque_por_titulo_parrafos(docx_file, nrm(key))
-        if bloque:
-            kv = parse_key_value_lines(bloque)
-            if not kv.empty:
-                return dedupe_columns(kv)
-            return pd.DataFrame([{"Campo":"Texto", "Valor":" ".join(bloque)}])
-    return pd.DataFrame()
+            return [normalize_micotoxinas(t) for t in tablas]
+    return []
 
 # ---------------- UI ----------------
 archivo = st.file_uploader("📂 Sube la especificación (.docx)", type=["docx"])
@@ -420,17 +430,19 @@ if archivo:
 
     st.markdown("---")
 
-    # 6) Empaque y Rotulado
-    st.subheader("6) Empaque y rotulado")
-    emp_df = extraer_empaque_rotulado(archivo)
-    if emp_df is not None and not emp_df.empty:
-        emp_df = dedupe_columns(emp_df)
-        st.dataframe(emp_df, use_container_width=True)
-        st.download_button("⬇️ Descargar empaque/rotulado (CSV)",
-                           emp_df.to_csv(index=False).encode("utf-8"),
-                           "empaque_rotulado.csv", "text/csv")
+    # 6) Micotoxinas
+    st.subheader("6) Micotoxinas (tabla)")
+    microtox_tabs = extraer_micotoxinas(archivo)
+    if not microtox_tabs:
+        st.info("No se detectaron tablas en el inciso 6 (Micotoxinas).")
     else:
-        st.info("No se encontró información para el inciso 6 (Empaque y rotulado).")
+        for i, df in enumerate(microtox_tabs, 1):
+            df = dedupe_columns(df)
+            st.caption(f"Tabla micotoxinas {i}")
+            st.dataframe(df, use_container_width=True)
+            st.download_button(f"⬇️ Descargar micotoxinas {i} (CSV)",
+                               df.to_csv(index=False).encode("utf-8"),
+                               f"micotoxinas_{i}.csv", "text/csv", key=f"dl_mico_{i}")
 
 else:
     st.info("Sube el .docx para extraer los incisos 1–6.")
