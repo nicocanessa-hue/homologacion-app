@@ -4,33 +4,34 @@ import pandas as pd
 import streamlit as st
 from docx import Document
 
-st.set_page_config(page_title="Inciso 2 · Composición e Ingredientes", page_icon="🍫", layout="centered")
-st.title("Inciso 2 · Composición del Producto (%) e Ingredientes")
+st.set_page_config(page_title="Incisos 1 y 2 · Especificación", page_icon="📄", layout="centered")
+st.title("Especificación · Incisos 1 (Descripción) y 2 (Composición)")
 
+# ---------------- Utils ----------------
 def nrm(s: str) -> str:
     s = "" if s is None else str(s).strip()
     s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-    return s
+    s = re.sub(r"\s+", " ", s)
+    return s.lower()
 
 def es_titulo_numerado(texto: str) -> bool:
     return bool(re.match(r"^\s*\d+(\.| )", texto or ""))
 
-def extraer_bloque(docx_file, titulo_busqueda_norm: str) -> list[str]:
-    """Devuelve los párrafos (en orden) del inciso cuyo título normalizado contiene titulo_busqueda_norm."""
+def extraer_bloque_por_titulo(docx_file, contiene_titulo_norm: str) -> list[str]:
+    """Devuelve los párrafos (en orden) del inciso cuyo título normalizado contiene contiene_titulo_norm."""
     doc = Document(docx_file)
     paras = [p.text for p in doc.paragraphs]
 
     # hallar inicio del inciso por título numerado que contenga el texto buscado
     start_idx = None
     for i, p in enumerate(paras):
-        t = nrm(p).lower()
-        if es_titulo_numerado(p) and titulo_busqueda_norm in t:
+        if es_titulo_numerado(p) and contiene_titulo_norm in nrm(p):
             start_idx = i + 1
             break
     if start_idx is None:
         return []
 
-    # recolectar hasta el siguiente inciso
+    # recolectar hasta el siguiente título numerado
     out = []
     for p in paras[start_idx:]:
         if es_titulo_numerado(p):
@@ -39,14 +40,20 @@ def extraer_bloque(docx_file, titulo_busqueda_norm: str) -> list[str]:
             out.append(p.strip())
     return out
 
-# Regex robusta: "Ingrediente ... 35,18%" / "Ingrediente: 35.18 %" / "Ingrediente - 64"
+# ---- Inciso 1: Descripción del Producto ----
+def extraer_descripcion(docx_file) -> str:
+    bloque = extraer_bloque_por_titulo(docx_file, "descripcion del producto")
+    return " ".join(bloque).strip()
+
+# ---- Inciso 2: Composición e Ingredientes ----
+# Acepta formatos: "Ingrediente 35,18%", "Ingrediente: 35.18 %", "Ingrediente - 64", etc.
 RE_ITEM = re.compile(
     r"""
     ^\s*
-    (?P<ing>.+?)                # nombre ingrediente (perezoso)
-    \s*[:\-–]?\s*               # separador opcional (: - –)
+    (?P<ing>.+?)                # nombre ingrediente
+    \s*[:\-–]?\s*               # separador opcional
     (?P<pct>\d+(?:[.,]\d+)?)    # número (coma o punto)
-    \s*%?                       # símbolo % opcional
+    \s*%?                       # % opcional
     \s*$
     """,
     re.VERBOSE
@@ -55,7 +62,7 @@ RE_ITEM = re.compile(
 def parse_ingredientes(lines: list[str]) -> pd.DataFrame:
     rows = []
     for line in lines:
-        # dividir por comas si viene todo en una línea
+        # si vienen en una sola línea separados por comas, divide (sin cortar números decimales)
         parts = [p.strip() for p in re.split(r",(?!\d)", line) if p.strip()]
         for p in parts:
             m = RE_ITEM.match(p)
@@ -67,32 +74,46 @@ def parse_ingredientes(lines: list[str]) -> pd.DataFrame:
                 except:
                     pct = None
                 rows.append({"Ingrediente": ing, "%": pct})
-    # quitar duplicados y vacíos
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.drop_duplicates().reset_index(drop=True)
     return df
 
+def extraer_composicion(docx_file) -> pd.DataFrame:
+    bloque = extraer_bloque_por_titulo(docx_file, "composicion del producto (%) e ingredientes")
+    return parse_ingredientes(bloque), bloque
+
+# ---------------- UI ----------------
 archivo = st.file_uploader("📂 Sube la especificación (.docx)", type=["docx"])
 
 if archivo:
-    # busca el inciso 2 por texto normalizado (ajusta si tu título exacto varía)
-    titulo_norm = "2. composicion del producto (%) e ingredientes".lower().replace("á","a").replace("í","i").replace("ó","o").replace("é","e").replace("ú","u")
-    bloque = extraer_bloque(archivo, "composicion del producto (%) e ingredientes")
-
-    if not bloque:
-        st.error("⚠️ No encontré el inciso 2. Revisa que el título sea tipo: '2. COMPOSICIÓN DEL PRODUCTO (%) E INGREDIENTES'.")
+    # Inciso 1
+    descripcion = extraer_descripcion(archivo)
+    st.subheader("1) Descripción del Producto")
+    if descripcion:
+        df_desc = pd.DataFrame([{"Campo": "Descripción del Producto", "Valor": descripcion}])
+        st.table(df_desc)
+        st.download_button("⬇️ Descargar descripción (CSV)",
+                           data=df_desc.to_csv(index=False).encode("utf-8"),
+                           file_name="descripcion_producto.csv",
+                           mime="text/csv")
     else:
-        df = parse_ingredientes(bloque)
-        if df.empty:
-            st.warning("Leí el bloque, pero no pude detectar 'Ingrediente + %'. ¿Está escrito como 'Nombre : 35,18%'? Sube una captura de ejemplo si no.")
-            st.text("\n".join(bloque))
-        else:
-            st.success("✅ Inciso 2 leído y parseado")
-            st.table(df)
-            st.download_button("⬇️ Descargar composición (CSV)",
-                               data=df.to_csv(index=False).encode("utf-8"),
-                               file_name="composicion_ingredientes.csv",
-                               mime="text/csv")
+        st.warning("No se encontró el inciso 'Descripción del Producto'.")
+
+    st.markdown("---")
+
+    # Inciso 2
+    st.subheader("2) Composición del Producto (%) e Ingredientes")
+    df_comp, bloque_crudo = extraer_composicion(archivo)
+    if not df_comp.empty:
+        st.table(df_comp)
+        st.download_button("⬇️ Descargar composición (CSV)",
+                           data=df_comp.to_csv(index=False).encode("utf-8"),
+                           file_name="composicion_ingredientes.csv",
+                           mime="text/csv")
+    else:
+        st.warning("No se detectaron pares 'Ingrediente + %' en el inciso 2.")
+        with st.expander("Ver texto crudo del inciso 2 para revisar"):
+            st.text("\n".join(bloque_crudo) if bloque_crudo else "—")
 else:
-    st.info("Sube el .docx para extraer los ingredientes y sus porcentajes.")
+    st.info("Sube el .docx para extraer los incisos 1 y 2.")
