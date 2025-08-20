@@ -189,43 +189,50 @@ def normalize_fisicoquimicos(df):
     if df is None or df.empty:
         return df
 
-    # 1) Colapsar duplicados típicos
-    df = coalesce_by_stem(df, [
-        "PARÁMETRO", "UNIDAD", "MÉTODO UTILIZADO",
-        "PERIODICIDAD DE CONTROL", "CoA (Sí/No)", "ESPECIFICACIÓN"
-    ])
-
-    # 2) Detectar columnas que contengan min/target/max (muy flexible)
-    def find_col(keywords):
+    # --- helpers internos ---
+    def pick_col(keys):
+        """Devuelve la primera columna cuyo nombre *normalizado* contenga cualquiera de los keys."""
         for c in df.columns:
             cl = nrm(c)
-            if any(k in cl for k in keywords):
+            if any(k in cl for k in keys):
                 return c
         return None
 
-    min_col = find_col(["min", "mín", "minimo", "mínimo"])
-    tar_col = find_col(["target", "objetivo"])
-    max_col = find_col(["max", "máx", "maximo", "máximo"])
+    def clean_series(s):
+        if s is None or s == "":
+            return ""
+        return s.replace({"-": "", "–": ""}, regex=False)
 
-    # 3) Crear columnas normalizadas
-    df["MIN"] = df[min_col] if min_col else ""
-    df["TARGET"] = df[tar_col] if tar_col else ""
-    df["MAX"] = df[max_col] if max_col else ""
+    out = pd.DataFrame(index=df.index)
 
-    # 4) Asegurar nombre PARÁMETRO si viene variante
-    if "PARÁMETRO" not in df.columns:
-        for c in df.columns:
-            if "param" in nrm(c):
-                df = df.rename(columns={c: "PARÁMETRO"})
-                break
+    # 1) Detectar MIN / TARGET / MAX ANTES de colapsar nada
+    c_min = pick_col(["|min", "|mín", " min", " mín", "min", "mín", "minimo", "mínimo"])
+    c_tar = pick_col(["target", "objetivo"])
+    c_max = pick_col(["|max", "|máx", " max", " máx", "max", "máx", "maximo", "máximo"])
 
-    # 5) Selección final
-    keep = [c for c in [
-        "PARÁMETRO","MIN","TARGET","MAX",
-        "UNIDAD","MÉTODO UTILIZADO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"
-    ] if c in df.columns]
+    out["MIN"]    = clean_series(df[c_min]) if c_min else ""
+    out["TARGET"] = clean_series(df[c_tar]) if c_tar else ""
+    out["MAX"]    = clean_series(df[c_max]) if c_max else ""
 
-    out = df[keep].copy()
+    # 2) Otras columnas típicas
+    c_param = pick_col(["parametro", "parámetro"])
+    if c_param: out["PARÁMETRO"] = df[c_param]
+
+    c_unidad = pick_col(["unidad", "unit"])
+    if c_unidad: out["UNIDAD"] = df[c_unidad]
+
+    c_metodo = pick_col(["metodo utilizado", "método utilizado", "metodo", "método", "method"])
+    if c_metodo: out["MÉTODO UTILIZADO"] = df[c_metodo]
+
+    c_per = pick_col(["periodicidad de control", "frecuencia", "periodicidad"])
+    if c_per: out["PERIODICIDAD DE CONTROL"] = df[c_per]
+
+    c_coa = pick_col(["coa (si/no)", "coa (sí/no)", "coa"])
+    if c_coa: out["CoA (Sí/No)"] = df[c_coa]
+
+    # 3) Orden y limpieza de filas vacías
+    order = [c for c in ["PARÁMETRO","MIN","TARGET","MAX","UNIDAD","MÉTODO UTILIZADO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"] if c in out.columns]
+    out = out[order]
     out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
     return out
 
