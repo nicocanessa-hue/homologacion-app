@@ -7,6 +7,20 @@ st.title("Paso 1 · Leer una especificación .docx (texto + tablas)")
 
 archivo = st.file_uploader("📂 Sube la especificación en Word (.docx)", type=["docx"])
 
+def make_unique(cols):
+    """Evita encabezados duplicados: ['A','A','B'] -> ['A','A_1','B']"""
+    seen = {}
+    unique = []
+    for c in cols:
+        c = "" if c is None else str(c).strip()
+        if c in seen:
+            seen[c] += 1
+            unique.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            unique.append(c)
+    return unique
+
 def leer_docx(docx_file):
     doc = Document(docx_file)
 
@@ -20,27 +34,28 @@ def leer_docx(docx_file):
         for r in t.rows:
             celdas = []
             for c in r.cells:
-                # Tomamos todo el texto de la celda (líneas unidas y limpiadas)
-                txt = " ".join([p.text for p in c.paragraphs]).strip()
-                txt = " ".join(txt.split())  # colapsa espacios y saltos de línea
+                txt = " ".join(p.text for p in c.paragraphs).strip()
+                txt = " ".join(txt.split())  # colapsar espacios/saltos
                 celdas.append(txt)
             filas.append(celdas)
 
-        # Normalizamos filas con distinta cantidad de columnas
-        max_cols = max(len(f) for f in filas) if filas else 0
+        if not filas:
+            continue
+
+        # Normalizar largo de filas (relleno con "")
+        max_cols = max(len(f) for f in filas)
         filas = [f + [""] * (max_cols - len(f)) for f in filas]
 
-        # Heurística: usar primera fila como encabezado si parece “título”
-        use_header = False
-        if filas and len(filas) > 1:
-            # Si la primera fila tiene texto “diferente” al resto (más palabras o sin números), asumimos header
-            first_row = " ".join(filas[0]).lower()
-            use_header = True if len(first_row) > 0 else False
+        # Heurística simple: usar 1ª fila como encabezado
+        header = [str(x).strip() for x in filas[0]]
+        header_unique = make_unique(header)  # <<< CLAVE: volver únicos los encabezados
+        body = filas[1:] if len(filas) > 1 else []
 
-        if use_header:
-            df = pd.DataFrame(filas[1:], columns=filas[0])
+        if body:
+            df = pd.DataFrame(body, columns=header_unique)
         else:
-            df = pd.DataFrame(filas)
+            # Si solo hay 1 fila, igual devolvemos algo
+            df = pd.DataFrame(columns=header_unique)
 
         tablas.append(df)
 
@@ -64,19 +79,30 @@ if archivo:
         st.write(f"Se detectaron **{len(tablas)}** tablas.")
         if not tablas:
             st.info("No se detectaron tablas en este .docx.")
+
         for i, df in enumerate(tablas, start=1):
             st.caption(f"Tabla {i}")
             st.dataframe(df, use_container_width=True)
 
-            # Permitir elegir si la 1ª fila es encabezado (por si la heurística falló)
-            with st.expander(f"¿La primera fila es encabezado? (opción manual) · Tabla {i}"):
-                if st.checkbox(f"Usar 1ª fila como encabezado (Tabla {i})", value=False, key=f"hdr_{i}"):
+            # Opción manual: volver a aplicar encabezado con la 1ª fila del cuerpo
+            with st.expander(f"¿La primera fila REAL es la 2ª del archivo? (ajustar encabezado) · Tabla {i}"):
+                if st.checkbox(f"Usar segunda fila como encabezado (Tabla {i})", key=f"use_second_header_{i}"):
                     if len(df) > 1:
+                        # Construir nuevo header con la primera fila actual de datos
+                        new_header = make_unique([str(x).strip() for x in df.iloc[0].tolist()])
                         new_df = df.iloc[1:].copy()
-                        new_df.columns = df.iloc[0].tolist()
+                        new_df.columns = new_header
                         st.dataframe(new_df, use_container_width=True)
+                        # Botón de descarga de la versión ajustada
+                        st.download_button(
+                            label=f"⬇️ Descargar Tabla {i} (CSV) con encabezado ajustado",
+                            data=new_df.to_csv(index=False).encode("utf-8"),
+                            file_name=f"tabla_{i}_ajustada.csv",
+                            mime="text/csv",
+                            key=f"dl_adj_{i}"
+                        )
 
-            # Descarga CSV
+            # Descarga CSV de la versión base
             st.download_button(
                 label=f"⬇️ Descargar Tabla {i} (CSV)",
                 data=df.to_csv(index=False).encode("utf-8"),
