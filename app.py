@@ -1,4 +1,4 @@
-# app.py — Especificación · Incisos 1–4 (MIN/TARGET/MAX robusto)
+# app.py — Especificación · Incisos 1–4 (MIN/TARGET/MAX robusto + fix clean_series)
 
 import re
 import unicodedata
@@ -182,7 +182,7 @@ def extraer_organolepticos(docx_file) -> list[pd.DataFrame]:
         if tablas: return tablas
     return []
 
-# 4) Físico‑químicos — NORMALIZADOR ROBUSTO (MIN/TARGET/MAX)
+# 4) Físico‑químicos — NORMALIZADOR ROBUSTO (MIN/TARGET/MAX) + FIX clean_series
 def normalize_fisicoquimicos(df):
     if df is None or df.empty:
         return df
@@ -195,10 +195,14 @@ def normalize_fisicoquimicos(df):
                 return c
         return None
 
-    def clean_series(s):
-        if s is None or s == "":
-            return ""
-        return s.replace({"-": "", "–": ""}, regex=False)
+    def clean_series(s, idx):
+        """Devuelve una Series alineada a idx, limpiando '-' y '–'."""
+        if s is None:
+            return pd.Series([""] * len(idx), index=idx)
+        if isinstance(s, pd.Series):
+            return s.replace({"-": "", "–": ""})
+        # escalar -> replicar
+        return pd.Series([str(s).replace("-", "").replace("–", "")] * len(idx), index=idx)
 
     out = pd.DataFrame(index=df.index)
 
@@ -207,11 +211,11 @@ def normalize_fisicoquimicos(df):
     c_tar = pick_col(["target", "objetivo"])
     c_max = pick_col(["|max", "|máx", " max", " máx", "max", "máx", "maximo", "máximo"])
 
-    out["MIN"]    = clean_series(df[c_min]) if c_min else ""
-    out["TARGET"] = clean_series(df[c_tar]) if c_tar else ""
-    out["MAX"]    = clean_series(df[c_max]) if c_max else ""
+    out["MIN"]    = clean_series(df[c_min] if c_min else None, df.index)
+    out["TARGET"] = clean_series(df[c_tar] if c_tar else None, df.index)
+    out["MAX"]    = clean_series(df[c_max] if c_max else None, df.index)
 
-    # Otras columnas
+    # Otras columnas (buscar por sinónimos)
     c_param  = pick_col(["parametro", "parámetro"])
     c_unidad = pick_col(["unidad", "unit"])
     c_metodo = pick_col(["metodo utilizado", "método utilizado", "metodo", "método", "method"])
