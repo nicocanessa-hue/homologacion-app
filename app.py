@@ -1,13 +1,26 @@
 import streamlit as st
 import pandas as pd
-import re
-import unicodedata
+import re, unicodedata
 from collections import defaultdict
 from docx import Document
 
-st.title("📄 Lector de Especificaciones Técnicas")
+st.set_page_config(page_title="Lector de Especificaciones", page_icon="📄", layout="wide")
+st.title("📄 Lector de Especificaciones Técnicas (.docx)")
 
-# --- Funciones auxiliares ---
+# ---------- helpers ----------
+def make_unique(cols):
+    """['A','A','B'] -> ['A','A_1','B']"""
+    seen = {}
+    out = []
+    for c in cols:
+        c = "" if c is None else str(c).strip()
+        if c in seen:
+            seen[c] += 1
+            out.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            out.append(c)
+    return out
 
 def _nrm(s: str) -> str:
     if s is None: return ""
@@ -17,12 +30,10 @@ def _nrm(s: str) -> str:
     return s
 
 def _base_name(col: str) -> str:
-    """Quita sufijos _1, _2… y normaliza tildes/espacios."""
     c = _nrm(col)
-    c = re.sub(r"_(\d+)$", "", c)         # elimina sufijo _1, _2…
+    c = re.sub(r"_(\d+)$", "", c)  # quita sufijo _1, _2…
     return c
 
-# Mapa de nombres bonitos
 PRETTY = {
     "parametro": "PARÁMETRO",
     "especificacion": "ESPECIFICACIÓN",
@@ -31,8 +42,6 @@ PRETTY = {
     "periodicidad de control": "PERIODICIDAD DE CONTROL",
     "coa (si/no)": "CoA (Sí/No)",
 }
-
-# Sinónimos
 CANON = {
     "parametro": ["parametro", "parámetro"],
     "especificacion": ["especificacion", "especificación", "spec", "requisito", "valor"],
@@ -41,9 +50,7 @@ CANON = {
     "periodicidad de control": ["periodicidad de control", "frecuencia", "periodicidad"],
     "coa (si/no)": ["coa (si/no)", "coa (sí/no)", "coa", "certificado de analisis"],
 }
-
 def _canon_key(base: str) -> str:
-    """Devuelve la clave canónica (parametro, especificacion, …) si matchea; si no, usa el base."""
     for key, alts in CANON.items():
         for a in alts:
             if a in base:
@@ -51,15 +58,13 @@ def _canon_key(base: str) -> str:
     return base
 
 def coalesce_repeated_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Agrupa columnas por nombre base y hace 'primero no vacío' por fila."""
+    """Agrupa columnas por nombre base y toma el primer valor no vacío por fila."""
     if df is None or df.empty:
         return df
-
     groups = defaultdict(list)
     for col in df.columns:
         base = _canon_key(_base_name(col))
         groups[base].append(col)
-
     out = pd.DataFrame(index=df.index)
     for base, cols in groups.items():
         if len(cols) == 1:
@@ -67,54 +72,65 @@ def coalesce_repeated_columns(df: pd.DataFrame) -> pd.DataFrame:
         else:
             merged = df[cols].replace({"": pd.NA}).bfill(axis=1).iloc[:, 0]
             out[PRETTY.get(base, base.upper())] = merged.fillna("")
-
-    # quita columnas completamente vacías
     keep = [c for c in out.columns if out[c].astype(str).str.strip().any()]
     return out[keep]
 
-def read_docx_tables(path: str):
-    """Extrae todas las tablas de un .docx como dataframes."""
-    doc = Document(path)
+def read_docx_tables(file):
+    """Extrae todas las tablas del .docx como DataFrames; corrige encabezados duplicados y largos desiguales."""
+    doc = Document(file)
     tables = []
     for t in doc.tables:
-        data = []
-        for row in t.rows:
-            data.append([cell.text.strip() for cell in row.cells])
-        df = pd.DataFrame(data[1:], columns=data[0])
+        rows = []
+        for r in t.rows:
+            cells = []
+            for c in r.cells:
+                txt = " ".join(p.text for p in c.paragraphs).strip()
+                txt = " ".join(txt.split())
+                cells.append(txt)
+            rows.append(cells)
+        if not rows:  # tabla vacía
+            continue
+
+        # normaliza número de columnas por fila
+        max_cols = max(len(r) for r in rows)
+        rows = [r + [""] * (max_cols - len(r)) for r in rows]
+
+        # header seguro y ÚNICO
+        header = make_unique(rows[0])
+        body = rows[1:] if len(rows) > 1 else []
+
+        # construye DataFrame incluso con duplicados (ya únicos)
+        df = pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
         tables.append(df)
     return tables
 
-# --- Interfaz Streamlit ---
+# ---------- UI ----------
+docx_file = st.file_uploader("📂 Sube la especificación (.docx)", type=["docx"])
 
-uploaded_file = st.file_uploader("📂 Sube una especificación técnica (.docx)", type=["docx"])
-
-if uploaded_file:
+if docx_file:
     try:
-        tables = read_docx_tables(uploaded_file)
-        if not tables:
-            st.error("⚠️ No se detectaron tablas en el documento.")
-        else:
-            for i, df in enumerate(tables, start=1):
-                st.divider()
-                st.subheader(f"📊 Tabla {i}")
+        tdfs = read_docx_tables(docx_file)
+        if not tdfs:
+            st.warning("No se detectaron tablas en el documento.")
+        for i, raw_df in enumerate(tdfs, start=1):
+            st.divider()
+            st.subheader(f"📊 Tabla {i}")
 
-                # Tabla original
-                st.caption("Versión original extraída")
-                st.dataframe(df, use_container_width=True)
+            st.caption("Versión original (encabezados ya únicos)")
+            st.dataframe(raw_df, use_container_width=True)
 
-                # Tabla unificada
-                clean_df = coalesce_repeated_columns(df)
-                st.caption("✅ Versión unificada (sin duplicados)")
-                st.dataframe(clean_df, use_container_width=True)
+            st.caption("✅ Versión unificada (dup. combinados)")
+            clean = coalesce_repeated_columns(raw_df)
+            st.dataframe(clean, use_container_width=True)
 
-                # Descarga
-                st.download_button(
-                    f"⬇️ Descargar Tabla {i} unificada (CSV)",
-                    data=clean_df.to_csv(index=False).encode("utf-8"),
-                    file_name=f"tabla_{i}_unificada.csv",
-                    mime="text/csv",
-                    key=f"dl_clean_{i}"
-                )
-
+            st.download_button(
+                f"⬇️ Descargar Tabla {i} unificada (CSV)",
+                data=clean.to_csv(index=False).encode("utf-8"),
+                file_name=f"tabla_{i}_unificada.csv",
+                mime="text/csv",
+                key=f"dl_clean_{i}"
+            )
     except Exception as e:
         st.error(f"Error leyendo el DOCX: {e}")
+else:
+    st.info("Sube un .docx para comenzar.")
