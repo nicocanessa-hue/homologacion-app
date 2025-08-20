@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import pdfplumber
-import re
 import unicodedata
 
 # ==============================
@@ -16,7 +15,7 @@ HEADER_MAP = {
 }
 
 def nrm(text):
-    """Normaliza texto: minúsculas, sin tildes, sin caracteres raros"""
+    """Normaliza texto: minúsculas, sin tildes"""
     if not isinstance(text, str):
         return ""
     text = text.lower().strip()
@@ -35,13 +34,10 @@ def best_col_index(cols, synonyms):
                 return i
     return None
 
-def extract_table_schema_first(tables):
-    """Toma la primera tabla y renombra columnas según HEADER_MAP"""
-    if not tables:
-        return pd.DataFrame()
-
-    df = tables[0].extract()
-    df = pd.DataFrame(df[1:], columns=df[0])  # primera fila = encabezado
+def extract_table_schema_first(df):
+    """Renombra columnas de un DataFrame según HEADER_MAP"""
+    if df.empty:
+        return df
 
     new_cols = {}
     for key, synonyms in HEADER_MAP.items():
@@ -61,7 +57,8 @@ def read_pdf_tables(uploaded_file):
         for page in pdf.pages:
             page_tables = page.extract_tables()
             for t in page_tables:
-                tables.append(pd.DataFrame(t[1:], columns=t[0]))
+                df = pd.DataFrame(t[1:], columns=t[0])  # primera fila = encabezado
+                tables.append(df)
     return tables
 
 # ==============================
@@ -78,17 +75,18 @@ if spec_file and prov_files:
     try:
         # Leer especificación
         spec_tables = read_pdf_tables(spec_file)
-        spec_df = extract_table_schema_first(spec_tables)
+        spec_df = extract_table_schema_first(spec_tables[0]) if spec_tables else pd.DataFrame()
 
         # Leer proveedores
         prov_dfs = []
         for f in prov_files:
             tables = read_pdf_tables(f)
-            df = extract_table_schema_first(tables)
-            prov_dfs.append(df)
+            if tables:
+                df = extract_table_schema_first(tables[0])
+                prov_dfs.append(df)
 
         # Combinar proveedores
-        prov_df = pd.concat(prov_dfs, ignore_index=True)
+        prov_df = pd.concat(prov_dfs, ignore_index=True) if prov_dfs else pd.DataFrame()
 
         st.subheader("📘 Especificación Técnica (procesada)")
         st.dataframe(spec_df)
@@ -99,32 +97,35 @@ if spec_file and prov_files:
         # ==============================
         # 4) Comparación simple
         # ==============================
-        st.subheader("⚖️ Comparación preliminar")
-        comparison = []
-        for _, row in spec_df.iterrows():
-            var = row.get("variable", "")
-            criterio = row.get("criterio", "")
-            unidad = row.get("unidad", "")
+        if not spec_df.empty and not prov_df.empty:
+            st.subheader("⚖️ Comparación preliminar")
+            comparison = []
+            for _, row in spec_df.iterrows():
+                var = row.get("variable", "")
+                criterio = row.get("criterio", "")
+                unidad = row.get("unidad", "")
 
-            # Buscar en proveedores
-            match = prov_df[prov_df["variable"].str.contains(str(var), case=False, na=False)]
-            if not match.empty:
-                comparison.append({
-                    "variable": var,
-                    "criterio_esp": criterio,
-                    "unidad_esp": unidad,
-                    "proveedor_valores": ", ".join(match["criterio"].astype(str).tolist())
-                })
-            else:
-                comparison.append({
-                    "variable": var,
-                    "criterio_esp": criterio,
-                    "unidad_esp": unidad,
-                    "proveedor_valores": "❌ No encontrado"
-                })
+                # Buscar en proveedores
+                mask = prov_df["variable"].astype(str).str.contains(str(var), case=False, na=False) if "variable" in prov_df else []
+                match = prov_df[mask] if any(mask) else pd.DataFrame()
 
-        comp_df = pd.DataFrame(comparison)
-        st.dataframe(comp_df)
+                if not match.empty:
+                    comparison.append({
+                        "variable": var,
+                        "criterio_esp": criterio,
+                        "unidad_esp": unidad,
+                        "proveedor_valores": ", ".join(match["criterio"].astype(str).tolist()) if "criterio" in match else "Sin criterio"
+                    })
+                else:
+                    comparison.append({
+                        "variable": var,
+                        "criterio_esp": criterio,
+                        "unidad_esp": unidad,
+                        "proveedor_valores": "❌ No encontrado"
+                    })
+
+            comp_df = pd.DataFrame(comparison)
+            st.dataframe(comp_df)
 
     except Exception as e:
         st.error(f"Error al procesar archivos: {e}")
