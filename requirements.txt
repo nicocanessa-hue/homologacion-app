@@ -1,11 +1,3 @@
 streamlit
 pandas
-numpy
-pdfplumber
 python-docx
-camelot-py
-tabula-py
-unidecode
-rapidfuzz
-openpyxl
-PyPDF2
