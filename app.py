@@ -1,4 +1,4 @@
-# app.py — Especificación · Incisos 1–4 (MIN/TARGET/MAX robusto + fix clean_series)
+# app.py — Especificación · Incisos 1–5 (incluye Microbiológicos)
 
 import re
 import unicodedata
@@ -10,8 +10,8 @@ from docx.document import Document as _Document
 from docx.table import _Cell, Table as _Table
 from docx.text.paragraph import Paragraph
 
-st.set_page_config(page_title="Especificación · Incisos 1–4", page_icon="📄", layout="centered")
-st.title("Especificación · 1) Descripción · 2) Composición · 3) Organolépticos · 4) Físico‑químicos")
+st.set_page_config(page_title="Especificación · Incisos 1–5", page_icon="📄", layout="centered")
+st.title("Especificación · 1) Descripción · 2) Composición · 3) Organolépticos · 4) Físico‑químicos · 5) Microbiológicos")
 
 # ---------------- Utils ----------------
 def nrm(s: str) -> str:
@@ -77,12 +77,15 @@ def ffill_row(row):
     return out
 
 def table_to_df_maybe_multihdr(tbl: _Table) -> pd.DataFrame:
-    """Detecta encabezado de 2 filas (ESPECIFICACIÓN + MÍN/TARGET/MÁX) si existe."""
+    """Detecta encabezado de 2 filas (p. ej. ESPECIFICACIÓN + MÍN/TARGET/MÁX, o PLAN DE MUESTREO + subcampos)."""
     rows = table_rows(tbl)
     if not rows: return pd.DataFrame()
     if len(rows) >= 2:
         sub = [s.lower() for s in rows[1]]
-        if any(k in " ".join(sub) for k in ["mín", "min", "target", "máx", "max", "objetivo"]):
+        if any(k in " ".join(sub) for k in [
+            "mín","min","target","máx","max","objetivo",
+            "categoría","categoria","clase"," n "," c "," m "," m "
+        ]):
             top = ffill_row(rows[0])
             sub = ffill_row(rows[1])
             headers = []
@@ -134,7 +137,6 @@ def extraer_bloque_mixto_tablas(docx_file, contiene_titulo_norm: str, multihdr=F
             tablas.append(df)
     return tablas
 
-# Colapsa encabezados duplicados por prefijo (PARÁMETRO, ESPECIFICACIÓN, etc.)
 def coalesce_by_stem(df, stems):
     out = df.copy()
     for stem in stems:
@@ -148,13 +150,11 @@ def coalesce_by_stem(df, stems):
             out = out.rename(columns={cols[0]: stem})
     return out
 
-# ---------------- Incisos ----------------
-# 1) Descripción
+# ---------------- Incisos 1–3 ----------------
 def extraer_descripcion(docx_file) -> str:
     bloque = extraer_bloque_por_titulo_parrafos(docx_file, "descripcion del producto")
     return " ".join(bloque).strip()
 
-# 2) Composición
 RE_ITEM = re.compile(r"""^\s*(?P<ing>.+?)\s*[:\-–]?\s*(?P<pct>\d+(?:[.,]\d+)?)\s*%?\s*$""", re.VERBOSE)
 def parse_ingredientes(lines: list[str]) -> pd.DataFrame:
     rows = []
@@ -175,20 +175,18 @@ def extraer_composicion(docx_file) -> tuple[pd.DataFrame, list[str]]:
     bloque = extraer_bloque_por_titulo_parrafos(docx_file, "composicion del producto (%) e ingredientes")
     return parse_ingredientes(bloque), bloque
 
-# 3) Organolépticos
 def extraer_organolepticos(docx_file) -> list[pd.DataFrame]:
     for k in ["parametros organolepticos", "parámetros organolépticos"]:
         tablas = extraer_bloque_mixto_tablas(docx_file, nrm(k))
         if tablas: return tablas
     return []
 
-# 4) Físico‑químicos — NORMALIZADOR ROBUSTO (MIN/TARGET/MAX) + FIX clean_series
+# ---------------- Inciso 4 (Físico‑químicos) ----------------
 def normalize_fisicoquimicos(df):
     if df is None or df.empty:
         return df
 
     def pick_col(keys):
-        """Primera columna cuyo nombre normalizado contiene cualquiera de los keys."""
         for c in df.columns:
             cl = nrm(c)
             if any(k in cl for k in keys):
@@ -196,17 +194,14 @@ def normalize_fisicoquimicos(df):
         return None
 
     def clean_series(s, idx):
-        """Devuelve una Series alineada a idx, limpiando '-' y '–'."""
         if s is None:
             return pd.Series([""] * len(idx), index=idx)
         if isinstance(s, pd.Series):
             return s.replace({"-": "", "–": ""})
-        # escalar -> replicar
         return pd.Series([str(s).replace("-", "").replace("–", "")] * len(idx), index=idx)
 
     out = pd.DataFrame(index=df.index)
 
-    # Detectar MIN/TARGET/MAX ANTES de colapsar encabezados
     c_min = pick_col(["|min", "|mín", " min", " mín", "min", "mín", "minimo", "mínimo"])
     c_tar = pick_col(["target", "objetivo"])
     c_max = pick_col(["|max", "|máx", " max", " máx", "max", "máx", "maximo", "máximo"])
@@ -215,7 +210,6 @@ def normalize_fisicoquimicos(df):
     out["TARGET"] = clean_series(df[c_tar] if c_tar else None, df.index)
     out["MAX"]    = clean_series(df[c_max] if c_max else None, df.index)
 
-    # Otras columnas (buscar por sinónimos)
     c_param  = pick_col(["parametro", "parámetro"])
     c_unidad = pick_col(["unidad", "unit"])
     c_metodo = pick_col(["metodo utilizado", "método utilizado", "metodo", "método", "method"])
@@ -228,7 +222,6 @@ def normalize_fisicoquimicos(df):
     if c_per:    out["PERIODICIDAD DE CONTROL"] = df[c_per]
     if c_coa:    out["CoA (Sí/No)"] = df[c_coa]
 
-    # Orden y limpieza
     order = [c for c in ["PARÁMETRO","MIN","TARGET","MAX","UNIDAD","MÉTODO UTILIZADO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"] if c in out.columns]
     out = out[order]
     out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
@@ -239,6 +232,64 @@ def extraer_fisicoquimicos(docx_file) -> list[pd.DataFrame]:
         tablas = extraer_bloque_mixto_tablas(docx_file, nrm(k), multihdr=True)
         if tablas:
             return [normalize_fisicoquimicos(t) for t in tablas]
+    return []
+
+# ---------------- Inciso 5 (Microbiológicos) ----------------
+def normalize_microbiologicos(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatea 'PLAN DE MUESTREO' (Categoría/Clase/n/c/m/M) y normaliza columnas."""
+    if df is None or df.empty:
+        return df
+
+    # 1) Detectar subcolumnas típicas
+    def find_col(keys):
+        for c in df.columns:
+            if any(k in nrm(c) for k in keys):
+                return c
+        return None
+
+    # Si viene multihdr, habrá columnas del tipo 'PLAN DE MUESTREO|Categoría'
+    # Mapeamos robustamente por keywords
+    cols = {
+        "PARÁMETRO": find_col(["parámetro","parametro"]),
+        "MÉTODO": find_col(["método","metodo"]),
+        "GRUPO": find_col(["grupo"]),
+        "CATEGORÍA": find_col(["plan de muestreo|categoria","plan de muestreo|categoría","categoría","categoria"]),
+        "CLASE": find_col(["plan de muestreo|clase","clase"]),
+        "n": find_col(["plan de muestreo|n"," n " , "|n", " n"]),
+        "c": find_col(["plan de muestreo|c"," c " , "|c", " c"]),
+        "m": find_col(["plan de muestreo|m"," m " , "|m", " m"]),
+        "M": find_col(["plan de muestreo|m ","plan de muestreo|M"," M " , "|M", " m "]),  # por si viene segunda M mayúscula
+        "LÍMITE": find_col(["límite","limite"]),
+        "PERIODICIDAD DE CONTROL": find_col(["periodicidad de control","frecuencia","periodicidad"]),
+        "CoA (Sí/No)": find_col(["coa (si/no)","coa (sí/no)","coa"])
+    }
+
+    # 2) Construir salida ordenada
+    out_cols = ["PARÁMETRO","MÉTODO","GRUPO","CATEGORÍA","CLASE","n","c","m","M","LÍMITE","PERIODICIDAD DE CONTROL","CoA (Sí/No)"]
+    out = pd.DataFrame(index=df.index)
+    for k in out_cols:
+        if cols.get(k):
+            out[k] = df[cols[k]]
+    # Limpieza simple: guiones como vacío
+    for k in ["n","c","m","M","LÍMITE"]:
+        if k in out.columns:
+            out[k] = out[k].replace({"-": "", "–": ""})
+
+    # 3) Quitar filas vacías
+    out = out[[c for c in out_cols if c in out.columns]]
+    out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
+    return out
+
+def extraer_microbiologicos(docx_file) -> list[pd.DataFrame]:
+    keys = [
+        "parámetros microbiológicos",
+        "parametros microbiologicos",
+        "microbiologicos"
+    ]
+    for k in keys:
+        tablas = extraer_bloque_mixto_tablas(docx_file, nrm(k), multihdr=True)
+        if tablas:
+            return [normalize_microbiologicos(t) for t in tablas]
     return []
 
 # ---------------- UI ----------------
@@ -314,5 +365,24 @@ if archivo:
                 mime="text/csv",
                 key=f"dl_fq_{i}"
             )
+
+    st.markdown("---")
+
+    # 5) Microbiológicos
+    st.subheader("5) Parámetros microbiológicos (tabla)")
+    micro_tabs = extraer_microbiologicos(archivo)
+    if not micro_tabs:
+        st.warning("No se detectaron tablas en el inciso 5.")
+    else:
+        for i, df in enumerate(micro_tabs, 1):
+            st.caption(f"Tabla microbiológicos {i}")
+            st.dataframe(df, use_container_width=True)
+            st.download_button(
+                f"⬇️ Descargar microbiológicos {i} (CSV)",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name=f"microbiologicos_{i}.csv",
+                mime="text/csv",
+                key=f"dl_micro_{i}"
+            )
 else:
-    st.info("Sube el .docx para extraer los incisos 1–4.")
+    st.info("Sube el .docx para extraer los incisos 1–5.")
