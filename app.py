@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
-import docx2txt
+import docx
 import re
 
 # ---------- FUNCIONES GENERALES ----------
-def extract_text(file):
-    return docx2txt.process(file)
+def extract_text(doc):
+    """Extraer todo el texto de un docx"""
+    return "\n".join([p.text for p in doc.paragraphs])
 
 def clean_series(s: pd.Series) -> pd.Series:
     return s.astype(str).str.strip().replace("nan", "")
@@ -63,8 +64,8 @@ def extraer_fisicoquimicos(doc):
 
 # ---------- INCISO 5: Microbiológicos ----------
 def normalize_microbiologicos(df: pd.DataFrame) -> pd.DataFrame:
-    # Renombrar columnas duplicadas
-    df.columns = pd.io.parsers.ParserBase({'names':df.columns})._maybe_dedup_names(df.columns)
+    # Eliminar columnas duplicadas
+    df = df.loc[:, ~df.columns.duplicated()]
     return df
 
 def extraer_microbiologicos(doc):
@@ -82,7 +83,7 @@ def normalize_micotoxinas(df: pd.DataFrame) -> pd.DataFrame:
     out["Micotoxina"] = clean_series(df.iloc[:,0]) if df.shape[1] > 0 else ""
     out["Límite"] = clean_series(df.iloc[:,1]) if df.shape[1] > 1 else ""
 
-    # unificar número + unidad en la columna Límite
+    # Mantener valor + unidad juntos (ej: "10 ppb")
     out["Límite"] = out["Límite"].apply(lambda x: x.strip() if x else "")
     return out
 
@@ -100,7 +101,8 @@ st.title("Homologación - Extracción de Especificación Técnica")
 
 archivo = st.file_uploader("Sube el archivo .docx", type=["docx"])
 if archivo:
-    texto = extract_text(archivo)
+    doc = docx.Document(archivo)
+    texto = extract_text(doc)
 
     # Descripción
     st.header("1) Descripción del producto")
@@ -115,9 +117,6 @@ if archivo:
 
     # Organolépticos
     st.header("3) Parámetros organolépticos")
-    doc = docx2txt.process(archivo)  # usamos el doc
-    import docx
-    doc = docx.Document(archivo)
     org_tabs = extraer_organolepticos(doc)
     for i, df in enumerate(org_tabs, 1):
         st.subheader(f"Tabla organolépticos {i}")
