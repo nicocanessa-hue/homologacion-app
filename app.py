@@ -1,131 +1,91 @@
 import streamlit as st
 import pandas as pd
-import pdfplumber
-import unicodedata
+import fitz  # PyMuPDF
 
-# ==============================
-# 1) Normalización y utilidades
-# ==============================
-HEADER_MAP = {
-    "variable": ["parametro", "variable", "análisis", "analito", "compound"],
-    "criterio": ["especificación", "criterio", "requisito", "limite", "valor"],
-    "unidad": ["unidad", "unidad de medida", "%", "mg/kg", "meses"],
-    "min": ["min", "mínimo", "desde", "lower"],
-    "max": ["max", "máximo", "hasta", "upper"],
-}
+st.set_page_config(page_title="Extractor de Especificaciones Técnicas", layout="wide")
+st.title("📄 Extractor de Parámetros Técnicos desde PDF")
 
-def nrm(text):
-    """Normaliza texto: minúsculas, sin tildes"""
-    if not isinstance(text, str):
-        return ""
-    text = text.lower().strip()
-    text = "".join(
-        c for c in unicodedata.normalize("NFD", text)
-        if unicodedata.category(c) != "Mn"
-    )
-    return text
+# Función para limpiar texto
+def clean(text):
+    return text.strip().replace("\n", " ").replace("\r", "").replace("  ", " ")
 
-def best_col_index(cols, synonyms):
-    """Detecta cuál columna coincide mejor con un grupo de sinónimos"""
-    cols_norm = [nrm(c) for c in cols]
-    for i, c in enumerate(cols_norm):
-        for s in synonyms:
-            if nrm(s) in c:
-                return i
-    return None
+# Función para extraer parámetros desde texto
+def extraer_parametros(texto):
+    lines = texto.splitlines()
+    secciones_clave = [
+        "PARÁMETROS ORGANOLÉPTICOS",
+        "PARÁMETROS FÍSICO-QUÍMICOS",
+        "PARÁMETROS MICROBIOLÓGICOS",
+        "MICOTOXINAS",
+        "METALES PESADOS",
+        "INFORMACIÓN NUTRICIONAL",
+        "PERFIL DE AMINOÁCIDOS",
+        "VIDA ÚTIL",
+        "ENVASE Y EMBALAJE"
+    ]
+    current_section = None
+    parametros = []
 
-def extract_table_schema_first(df):
-    """Renombra columnas de un DataFrame según HEADER_MAP"""
-    if df.empty:
-        return df
+    for line in lines:
+        line = clean(line)
+        if any(sec in line for sec in secciones_clave):
+            current_section = line
+            continue
 
-    new_cols = {}
-    for key, synonyms in HEADER_MAP.items():
-        idx = best_col_index(df.columns, synonyms)
-        if idx is not None:
-            new_cols[df.columns[idx]] = key
+        if current_section and line:
+            if any(keyword in line.lower() for keyword in ["%", "mg", "ppb", "°c", "g", "kcal", "ufc", "nmp", "meses", "cada lote", "anual"]):
+                nombre = line.split()[0]
+                resto = " ".join(line.split()[1:]) if len(line.split()) > 1 else ""
 
-    df.rename(columns=new_cols, inplace=True)
-    return df
+                nums = [t for t in line.split() if any(c.isdigit() for c in t)]
+                min_val, target_val, max_val = (nums + [None]*3)[:3]
 
-# ==============================
-# 2) Lector de PDFs
-# ==============================
-def read_pdf_tables(uploaded_file):
-    tables = []
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            page_tables = page.extract_tables()
-            for t in page_tables:
-                df = pd.DataFrame(t[1:], columns=t[0])  # primera fila = encabezado
-                tables.append(df)
-    return tables
+                unidad = next((u for u in ["%", "mg/kg", "ppb", "°C", "g", "kcal", "ufc/g", "NMP/g", "meses"] if u in line), None)
+                metodo = next((m for m in ["IOCCC", "AOAC", "ISO", "Visual", "Sensorial", "Balanza", "Viscosímetro", "CQ-CROM", "Elisa"] if m.lower() in line.lower()), None)
+                frecuencia = "Cada lote" if "cada lote" in line.lower() else "Anual" if "anual" in line.lower() else None
+                coa = "Sí" if "SI" in line.upper() else "No" if "NO" in line.upper() else None
 
-# ==============================
-# 3) Streamlit UI
-# ==============================
-st.title("📑 Homologación de Materias Primas")
-st.write("Sube la especificación técnica y los documentos del proveedor para compararlos.")
+                parametros.append({
+                    "Sección": current_section,
+                    "Parámetro": nombre,
+                    "Mínimo": min_val,
+                    "Target": target_val,
+                    "Máximo": max_val,
+                    "Unidad": unidad,
+                    "Método": metodo,
+                    "Frecuencia": frecuencia,
+                    "CoA": coa,
+                    "Texto completo": line
+                })
 
-# Subir archivos
-spec_file = st.file_uploader("📘 Sube la especificación técnica (PDF)", type=["pdf"])
-prov_files = st.file_uploader("📗 Sube documentos del proveedor (PDF)", type=["pdf"], accept_multiple_files=True)
+    return pd.DataFrame(parametros)
 
-if spec_file and prov_files:
-    try:
-        # Leer especificación
-        spec_tables = read_pdf_tables(spec_file)
-        spec_df = extract_table_schema_first(spec_tables[0]) if spec_tables else pd.DataFrame()
+# Subida de archivo
+pdf_file = st.file_uploader("📎 Sube la especificación técnica en PDF", type=["pdf"])
 
-        # Leer proveedores
-        prov_dfs = []
-        for f in prov_files:
-            tables = read_pdf_tables(f)
-            if tables:
-                df = extract_table_schema_first(tables[0])
-                prov_dfs.append(df)
+if pdf_file:
+    st.success("PDF cargado correctamente ✅")
 
-        # Combinar proveedores
-        prov_df = pd.concat(prov_dfs, ignore_index=True) if prov_dfs else pd.DataFrame()
+    # Leer PDF con PyMuPDF
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    full_text = ""
+    for page in doc:
+        full_text += page.get_text()
 
-        st.subheader("📘 Especificación Técnica (procesada)")
-        st.dataframe(spec_df)
+    # Extraer parámetros
+    df = extraer_parametros(full_text)
 
-        st.subheader("📗 Datos del Proveedor (procesados)")
-        st.dataframe(prov_df)
+    st.subheader("📋 Parámetros extraídos")
+    st.dataframe(df, use_container_width=True)
 
-        # ==============================
-        # 4) Comparación simple
-        # ==============================
-        if not spec_df.empty and not prov_df.empty:
-            st.subheader("⚖️ Comparación preliminar")
-            comparison = []
-            for _, row in spec_df.iterrows():
-                var = row.get("variable", "")
-                criterio = row.get("criterio", "")
-                unidad = row.get("unidad", "")
+    # Descargar como Excel
+    output = pd.ExcelWriter("parametros_extraidos.xlsx", engine="openpyxl")
+    df.to_excel(output, index=False)
+    output.close()
 
-                # Buscar en proveedores
-                mask = prov_df["variable"].astype(str).str.contains(str(var), case=False, na=False) if "variable" in prov_df else []
-                match = prov_df[mask] if any(mask) else pd.DataFrame()
+    with open("parametros_extraidos.xlsx", "rb") as f:
+        st.download_button("📥 Descargar como Excel", f, file_name="parametros_extraidos.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-                if not match.empty:
-                    comparison.append({
-                        "variable": var,
-                        "criterio_esp": criterio,
-                        "unidad_esp": unidad,
-                        "proveedor_valores": ", ".join(match["criterio"].astype(str).tolist()) if "criterio" in match else "Sin criterio"
-                    })
-                else:
-                    comparison.append({
-                        "variable": var,
-                        "criterio_esp": criterio,
-                        "unidad_esp": unidad,
-                        "proveedor_valores": "❌ No encontrado"
-                    })
+else:
+    st.info("Por favor, sube un archivo PDF para comenzar.")
 
-            comp_df = pd.DataFrame(comparison)
-            st.dataframe(comp_df)
-
-    except Exception as e:
-        st.error(f"Error al procesar archivos: {e}")
