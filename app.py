@@ -1,4 +1,4 @@
-# app.py — Especificación · Incisos 1–4 (con MIN/TARGET/MAX corregidos)
+# app.py — Especificación · Incisos 1–4 (MIN/TARGET/MAX robusto)
 
 import re
 import unicodedata
@@ -77,10 +77,9 @@ def ffill_row(row):
     return out
 
 def table_to_df_maybe_multihdr(tbl: _Table) -> pd.DataFrame:
-    """Soporta encabezado de 2 filas (ESPECIFICACIÓN + MÍN/TARGET/MÁX) si existe."""
+    """Detecta encabezado de 2 filas (ESPECIFICACIÓN + MÍN/TARGET/MÁX) si existe."""
     rows = table_rows(tbl)
     if not rows: return pd.DataFrame()
-
     if len(rows) >= 2:
         sub = [s.lower() for s in rows[1]]
         if any(k in " ".join(sub) for k in ["mín", "min", "target", "máx", "max", "objetivo"]):
@@ -93,7 +92,6 @@ def table_to_df_maybe_multihdr(tbl: _Table) -> pd.DataFrame:
             headers = make_unique(headers)
             body = rows[2:] if len(rows) > 2 else []
             return pd.DataFrame(body, columns=headers) if body else pd.DataFrame(columns=headers)
-
     return table_to_df(tbl)
 
 def extraer_bloque_por_titulo_parrafos(docx_file, contiene_titulo_norm: str) -> list[str]:
@@ -136,7 +134,7 @@ def extraer_bloque_mixto_tablas(docx_file, contiene_titulo_norm: str, multihdr=F
             tablas.append(df)
     return tablas
 
-# Colapsar encabezados duplicados por prefijo (PARÁMETRO, ESPECIFICACIÓN, etc.)
+# Colapsa encabezados duplicados por prefijo (PARÁMETRO, ESPECIFICACIÓN, etc.)
 def coalesce_by_stem(df, stems):
     out = df.copy()
     for stem in stems:
@@ -184,14 +182,13 @@ def extraer_organolepticos(docx_file) -> list[pd.DataFrame]:
         if tablas: return tablas
     return []
 
-# 4) Físico‑químicos — FUNCIÓN CORREGIDA (MIN/TARGET/MAX flexible)
+# 4) Físico‑químicos — NORMALIZADOR ROBUSTO (MIN/TARGET/MAX)
 def normalize_fisicoquimicos(df):
     if df is None or df.empty:
         return df
 
-    # --- helpers internos ---
     def pick_col(keys):
-        """Devuelve la primera columna cuyo nombre *normalizado* contenga cualquiera de los keys."""
+        """Primera columna cuyo nombre normalizado contiene cualquiera de los keys."""
         for c in df.columns:
             cl = nrm(c)
             if any(k in cl for k in keys):
@@ -205,7 +202,7 @@ def normalize_fisicoquimicos(df):
 
     out = pd.DataFrame(index=df.index)
 
-    # 1) Detectar MIN / TARGET / MAX ANTES de colapsar nada
+    # Detectar MIN/TARGET/MAX ANTES de colapsar encabezados
     c_min = pick_col(["|min", "|mín", " min", " mín", "min", "mín", "minimo", "mínimo"])
     c_tar = pick_col(["target", "objetivo"])
     c_max = pick_col(["|max", "|máx", " max", " máx", "max", "máx", "maximo", "máximo"])
@@ -214,23 +211,20 @@ def normalize_fisicoquimicos(df):
     out["TARGET"] = clean_series(df[c_tar]) if c_tar else ""
     out["MAX"]    = clean_series(df[c_max]) if c_max else ""
 
-    # 2) Otras columnas típicas
-    c_param = pick_col(["parametro", "parámetro"])
-    if c_param: out["PARÁMETRO"] = df[c_param]
-
+    # Otras columnas
+    c_param  = pick_col(["parametro", "parámetro"])
     c_unidad = pick_col(["unidad", "unit"])
-    if c_unidad: out["UNIDAD"] = df[c_unidad]
-
     c_metodo = pick_col(["metodo utilizado", "método utilizado", "metodo", "método", "method"])
+    c_per    = pick_col(["periodicidad de control", "frecuencia", "periodicidad"])
+    c_coa    = pick_col(["coa (si/no)", "coa (sí/no)", "coa"])
+
+    if c_param:  out["PARÁMETRO"] = df[c_param]
+    if c_unidad: out["UNIDAD"] = df[c_unidad]
     if c_metodo: out["MÉTODO UTILIZADO"] = df[c_metodo]
+    if c_per:    out["PERIODICIDAD DE CONTROL"] = df[c_per]
+    if c_coa:    out["CoA (Sí/No)"] = df[c_coa]
 
-    c_per = pick_col(["periodicidad de control", "frecuencia", "periodicidad"])
-    if c_per: out["PERIODICIDAD DE CONTROL"] = df[c_per]
-
-    c_coa = pick_col(["coa (si/no)", "coa (sí/no)", "coa"])
-    if c_coa: out["CoA (Sí/No)"] = df[c_coa]
-
-    # 3) Orden y limpieza de filas vacías
+    # Orden y limpieza
     order = [c for c in ["PARÁMETRO","MIN","TARGET","MAX","UNIDAD","MÉTODO UTILIZADO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"] if c in out.columns]
     out = out[order]
     out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
