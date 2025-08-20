@@ -8,8 +8,8 @@ from docx.document import Document as _Document
 from docx.table import _Cell, Table as _Table
 from docx.text.paragraph import Paragraph
 
-st.set_page_config(page_title="Especificación · Incisos 1-3", page_icon="📄", layout="centered")
-st.title("Especificación · Incisos 1 (Descripción), 2 (Composición) y 3 (Organolépticos)")
+st.set_page_config(page_title="Especificación · Incisos 1-4", page_icon="📄", layout="centered")
+st.title("Especificación · Incisos 1 (Descripción), 2 (Composición), 3 (Organolépticos), 4 (Físico‑químicos)")
 
 # ---------------- Utils ----------------
 def nrm(s: str) -> str:
@@ -22,7 +22,6 @@ def es_titulo_numerado(texto: str) -> bool:
     return bool(re.match(r"^\s*\d+(\.| )", texto or ""))
 
 def iter_block_items(parent):
-    """Itera párrafos y tablas en orden."""
     if isinstance(parent, _Document):
         parent_elm = parent.element.body
     elif isinstance(parent, _Cell):
@@ -48,23 +47,60 @@ def make_unique(cols):
             out.append(c)
     return out
 
-def table_to_df(tbl: _Table) -> pd.DataFrame:
-    """Convierte una tabla DOCX en DataFrame (header = 1ª fila)."""
+def table_rows(tbl: _Table):
     rows = []
     for r in tbl.rows:
         cells = [(" ".join(p.text for p in cell.paragraphs)).strip() for cell in r.cells]
         cells = [" ".join(x.split()) for x in cells]
         rows.append(cells)
     if not rows:
-        return pd.DataFrame()
+        return []
     max_cols = max(len(r) for r in rows)
-    rows = [r + [""] * (max_cols - len(r)) for r in rows]
+    return [r + [""] * (max_cols - len(r)) for r in rows]
+
+def table_to_df(tbl: _Table) -> pd.DataFrame:
+    rows = table_rows(tbl)
+    if not rows: return pd.DataFrame()
     header = make_unique(rows[0])
     body = rows[1:] if len(rows) > 1 else []
     return pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
 
+def ffill_row(row):
+    cur = ""
+    out = []
+    for x in row:
+        x = (x or "").strip()
+        if x: cur = x
+        out.append(cur)
+    return out
+
+def table_to_df_maybe_multihdr(tbl: _Table) -> pd.DataFrame:
+    """Soporta encabezado de 2 filas (ESPECIFICACIÓN + MÍN/TARGET/MÁX)."""
+    rows = table_rows(tbl)
+    if not rows: return pd.DataFrame()
+
+    # ¿la segunda fila parece sub-encabezado?
+    if len(rows) >= 2:
+        sub = [s.lower() for s in rows[1]]
+        if any(k in " ".join(sub) for k in ["mín", "min", "target", "máx", "max"]):
+            top = ffill_row(rows[0])
+            sub = ffill_row(rows[1])
+            headers = []
+            for a,b in zip(top, sub):
+                a_clean = a.strip()
+                b_clean = b.strip()
+                if b_clean:
+                    headers.append(f"{a_clean}|{b_clean}")
+                else:
+                    headers.append(a_clean)
+            headers = make_unique(headers)
+            body = rows[2:] if len(rows) > 2 else []
+            return pd.DataFrame(body, columns=headers) if body else pd.DataFrame(columns=headers)
+
+    # si no, usar header simple
+    return table_to_df(tbl)
+
 def extraer_bloque_por_titulo_parrafos(docx_file, contiene_titulo_norm: str) -> list[str]:
-    """Solo párrafos entre el título buscado y el siguiente inciso numerado."""
     doc = Document(docx_file)
     paras = [p.text for p in doc.paragraphs]
     start_idx = None
@@ -82,8 +118,7 @@ def extraer_bloque_por_titulo_parrafos(docx_file, contiene_titulo_norm: str) -> 
             out.append(p.strip())
     return out
 
-def extraer_bloque_mixto_tablas(docx_file, contiene_titulo_norm: str):
-    """Devuelve todas las tablas entre el título buscado y el siguiente inciso."""
+def extraer_bloque_mixto_tablas(docx_file, contiene_titulo_norm: str, multihdr=False):
     doc = Document(docx_file)
     blocks = list(iter_block_items(doc))
     start = None
@@ -101,7 +136,8 @@ def extraer_bloque_mixto_tablas(docx_file, contiene_titulo_norm: str):
     tablas = []
     for b in blocks[start:end]:
         if isinstance(b, _Table):
-            tablas.append(table_to_df(b))
+            df = table_to_df_maybe_multihdr(b) if multihdr else table_to_df(b)
+            tablas.append(df)
     return tablas
 
 # --- helper para colapsar encabezados duplicados por prefijo (PARÁMETRO, ESPECIFICACIÓN, etc.) ---
@@ -118,14 +154,14 @@ def coalesce_by_stem(df, stems):
             out = out.rename(columns={cols[0]: stem})
     return out
 
-# ---- Inciso 1: Descripción del Producto ----
+# ---------------- Incisos ----------------
+# 1) Descripción
 def extraer_descripcion(docx_file) -> str:
     bloque = extraer_bloque_por_titulo_parrafos(docx_file, "descripcion del producto")
     return " ".join(bloque).strip()
 
-# ---- Inciso 2: Composición e Ingredientes ----
+# 2) Composición
 RE_ITEM = re.compile(r"""^\s*(?P<ing>.+?)\s*[:\-–]?\s*(?P<pct>\d+(?:[.,]\d+)?)\s*%?\s*$""", re.VERBOSE)
-
 def parse_ingredientes(lines: list[str]) -> pd.DataFrame:
     rows = []
     for line in lines:
@@ -139,24 +175,65 @@ def parse_ingredientes(lines: list[str]) -> pd.DataFrame:
                 except: pct = None
                 rows.append({"Ingrediente": ing, "%": pct})
     df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.drop_duplicates().reset_index(drop=True)
+    if not df.empty: df = df.drop_duplicates().reset_index(drop=True)
     return df
-
 def extraer_composicion(docx_file) -> tuple[pd.DataFrame, list[str]]:
     bloque = extraer_bloque_por_titulo_parrafos(docx_file, "composicion del producto (%) e ingredientes")
     return parse_ingredientes(bloque), bloque
 
-# ---- Inciso 3: Parámetros organolépticos (tabla) ----
+# 3) Organolépticos
 def extraer_organolepticos(docx_file) -> list[pd.DataFrame]:
-    keys = [
-        "parametros organolepticos",
-        "parámetros organolépticos",
-    ]
-    for k in keys:
+    for k in ["parametros organolepticos", "parámetros organolépticos"]:
         tablas = extraer_bloque_mixto_tablas(docx_file, nrm(k))
+        if tablas: return tablas
+    return []
+
+# 4) Físico‑químicos (multi‑header MÍN/TARGET/MÁX)
+def normalize_fisicoquimicos(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    # 1) Colapsar duplicados típicos
+    df = coalesce_by_stem(df, ["PARÁMETRO", "UNIDAD", "MÉTODO UTILIZADO", "PERIODICIDAD DE CONTROL", "CoA (Sí/No)", "ESPECIFICACIÓN"])
+
+    # 2) Si tenemos columnas compuestas ESPECIFICACIÓN|MÍN / |TARGET / |MÁX -> mapear
+    cols_lower = {c.lower(): c for c in df.columns}
+    min_col = next((cols_lower[c] for c in cols_lower if "especificación|min" in c or "especificacion|min" in c), None)
+    tar_col = next((cols_lower[c] for c in cols_lower if "especificación|target" in c or "especificacion|target" in c), None)
+    max_col = next((cols_lower[c] for c in cols_lower if "especificación|máx" in c or "especificacion|max" in c or "especificación|max" in c), None)
+
+    # 3) Si no existen compuestas, pero hay ESPECIFICACIÓN, intenta separar si trae "min / max / target" en celdas (fallback ligero)
+    if not any([min_col, tar_col, max_col]) and "ESPECIFICACIÓN" in df.columns:
+        # de momento, dejamos todo en MAX si hay un único valor; refinaremos después si se requiere
+        df["MIN"] = ""
+        df["TARGET"] = ""
+        df["MAX"] = df["ESPECIFICACIÓN"]
+    else:
+        if min_col: df["MIN"] = df[min_col]
+        if tar_col: df["TARGET"] = df[tar_col]
+        if max_col: df["MAX"] = df[max_col]
+
+    # 4) Renombrar/ordenar columnas de salida
+    keep = [c for c in ["PARÁMETRO","MIN","TARGET","MAX","UNIDAD","MÉTODO UTILIZADO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"] if c in df.columns]
+    # si faltan algunas, no pasa nada
+    if "PARÁMETRO" not in keep:
+        # intentar detectar equivalente
+        for c in df.columns:
+            if nrm(c) in ["parametro","parámetro"]:
+                df = df.rename(columns={c:"PARÁMETRO"})
+                keep = ["PARÁMETRO"] + [k for k in keep if k!="PARÁMETRO"]
+                break
+    out = df[keep].copy()
+
+    # 5) Filtrar filas vacías
+    out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
+    return out
+
+def extraer_fisicoquimicos(docx_file) -> list[pd.DataFrame]:
+    for k in ["parámetros físico-químicos", "parametros fisico-quimicos", "parametros físico-químicos"]:
+        tablas = extraer_bloque_mixto_tablas(docx_file, nrm(k), multihdr=True)
         if tablas:
-            return tablas
+            return [normalize_fisicoquimicos(t) for t in tablas]
     return []
 
 # ---------------- UI ----------------
@@ -201,11 +278,9 @@ if archivo:
         st.warning("No se detectaron tablas en el inciso 3.")
     else:
         for i, df in enumerate(organo_tabs, 1):
-            # Limpia duplicados de encabezado (PARÁMETRO, ESPECIFICACIÓN, etc.)
             df_clean = coalesce_by_stem(df, ["PARÁMETRO", "ESPECIFICACIÓN"])
             keep = [c for c in ["PARÁMETRO", "ESPECIFICACIÓN"] if c in df_clean.columns]
-            if keep:
-                df_clean = df_clean[keep]
+            if keep: df_clean = df_clean[keep]
             st.caption(f"Tabla organolépticos {i}")
             st.dataframe(df_clean, use_container_width=True)
             st.download_button(
@@ -215,5 +290,24 @@ if archivo:
                 mime="text/csv",
                 key=f"dl_org_{i}"
             )
+
+    st.markdown("---")
+
+    # 4) Físico‑químicos
+    st.subheader("4) Parámetros físico‑químicos (tabla)")
+    fisq_tabs = extraer_fisicoquimicos(archivo)
+    if not fisq_tabs:
+        st.warning("No se detectaron tablas en el inciso 4.")
+    else:
+        for i, df in enumerate(fisq_tabs, 1):
+            st.caption(f"Tabla físico‑químicos {i}")
+            st.dataframe(df, use_container_width=True)
+            st.download_button(
+                f"⬇️ Descargar físico‑químicos {i} (CSV)",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name=f"fisicoquimicos_{i}.csv",
+                mime="text/csv",
+                key=f"dl_fq_{i}"
+            )
 else:
-    st.info("Sube el .docx para extraer los incisos 1, 2 y 3.")
+    st.info("Sube el .docx para extraer los incisos 1–4.")
