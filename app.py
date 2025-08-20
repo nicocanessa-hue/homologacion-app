@@ -9,7 +9,7 @@ from docx.table import _Cell, Table as _Table
 from docx.text.paragraph import Paragraph
 
 st.set_page_config(page_title="Especificación · Incisos 1-3", page_icon="📄", layout="centered")
-st.title("Especificación · Incisos 1 (Descripción), 2 (Composición) y 3 (Parámetros organolépticos)")
+st.title("Especificación · Incisos 1 (Descripción), 2 (Composición) y 3 (Organolépticos)")
 
 # ---------------- Utils ----------------
 def nrm(s: str) -> str:
@@ -35,8 +35,36 @@ def iter_block_items(parent):
         elif child.tag == qn('w:tbl'):
             yield _Table(child, parent)
 
+def make_unique(cols):
+    seen = {}
+    out = []
+    for c in cols:
+        c = "" if c is None else str(c).strip()
+        if c in seen:
+            seen[c] += 1
+            out.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            out.append(c)
+    return out
+
+def table_to_df(tbl: _Table) -> pd.DataFrame:
+    """Convierte una tabla DOCX en DataFrame (header = 1ª fila)."""
+    rows = []
+    for r in tbl.rows:
+        cells = [(" ".join(p.text for p in cell.paragraphs)).strip() for cell in r.cells]
+        cells = [" ".join(x.split()) for x in cells]
+        rows.append(cells)
+    if not rows:
+        return pd.DataFrame()
+    max_cols = max(len(r) for r in rows)
+    rows = [r + [""] * (max_cols - len(r)) for r in rows]
+    header = make_unique(rows[0])
+    body = rows[1:] if len(rows) > 1 else []
+    return pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
+
 def extraer_bloque_por_titulo_parrafos(docx_file, contiene_titulo_norm: str) -> list[str]:
-    """Solo párrafos entre el título y el siguiente inciso."""
+    """Solo párrafos entre el título buscado y el siguiente inciso numerado."""
     doc = Document(docx_file)
     paras = [p.text for p in doc.paragraphs]
     start_idx = None
@@ -54,34 +82,6 @@ def extraer_bloque_por_titulo_parrafos(docx_file, contiene_titulo_norm: str) -> 
             out.append(p.strip())
     return out
 
-def make_unique(cols):
-    seen = {}
-    out = []
-    for c in cols:
-        c = "" if c is None else str(c).strip()
-        if c in seen:
-            seen[c] += 1
-            out.append(f"{c}_{seen[c]}")
-        else:
-            seen[c] = 0
-            out.append(c)
-    return out
-
-def table_to_df(tbl: _Table) -> pd.DataFrame:
-    """Convierte una tabla DOCX en DataFrame con header=primera fila; maneja celdas combinadas básicas."""
-    rows = []
-    for r in tbl.rows:
-        cells = [(" ".join(p.text for p in cell.paragraphs)).strip() for cell in r.cells]
-        cells = [" ".join(x.split()) for x in cells]
-        rows.append(cells)
-    if not rows:
-        return pd.DataFrame()
-    max_cols = max(len(r) for r in rows)
-    rows = [r + [""] * (max_cols - len(r)) for r in rows]
-    header = make_unique(rows[0])
-    body = rows[1:] if len(rows) > 1 else []
-    return pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
-
 def extraer_bloque_mixto_tablas(docx_file, contiene_titulo_norm: str):
     """Devuelve todas las tablas entre el título buscado y el siguiente inciso."""
     doc = Document(docx_file)
@@ -93,18 +93,30 @@ def extraer_bloque_mixto_tablas(docx_file, contiene_titulo_norm: str):
             break
     if start is None:
         return []
-    # cortar hasta próximo inciso
     end = len(blocks)
     for j in range(start, len(blocks)):
         if isinstance(blocks[j], Paragraph) and es_titulo_numerado(blocks[j].text):
             end = j
             break
-    # recoger tablas
     tablas = []
     for b in blocks[start:end]:
         if isinstance(b, _Table):
             tablas.append(table_to_df(b))
     return tablas
+
+# --- helper para colapsar encabezados duplicados por prefijo (PARÁMETRO, ESPECIFICACIÓN, etc.) ---
+def coalesce_by_stem(df, stems):
+    out = df.copy()
+    for stem in stems:
+        cols = [c for c in df.columns if nrm(c).startswith(nrm(stem))]
+        if len(cols) > 1:
+            merged = df[cols].replace({"": pd.NA}).bfill(axis=1).iloc[:, 0]
+            out[stem] = merged.fillna("")
+            drop_cols = [c for c in cols if c != stem]
+            out = out.drop(columns=drop_cols, errors="ignore")
+        elif len(cols) == 1 and cols[0] != stem:
+            out = out.rename(columns={cols[0]: stem})
+    return out
 
 # ---- Inciso 1: Descripción del Producto ----
 def extraer_descripcion(docx_file) -> str:
@@ -112,10 +124,7 @@ def extraer_descripcion(docx_file) -> str:
     return " ".join(bloque).strip()
 
 # ---- Inciso 2: Composición e Ingredientes ----
-RE_ITEM = re.compile(
-    r"""^\s*(?P<ing>.+?)\s*[:\-–]?\s*(?P<pct>\d+(?:[.,]\d+)?)\s*%?\s*$""",
-    re.VERBOSE
-)
+RE_ITEM = re.compile(r"""^\s*(?P<ing>.+?)\s*[:\-–]?\s*(?P<pct>\d+(?:[.,]\d+)?)\s*%?\s*$""", re.VERBOSE)
 
 def parse_ingredientes(lines: list[str]) -> pd.DataFrame:
     rows = []
@@ -140,11 +149,9 @@ def extraer_composicion(docx_file) -> tuple[pd.DataFrame, list[str]]:
 
 # ---- Inciso 3: Parámetros organolépticos (tabla) ----
 def extraer_organolepticos(docx_file) -> list[pd.DataFrame]:
-    # Busca por variaciones comunes del título
     keys = [
         "parametros organolepticos",
         "parámetros organolépticos",
-        "parametros organolepticos (color, olor, sabor, textura)"  # por si viene largo
     ]
     for k in keys:
         tablas = extraer_bloque_mixto_tablas(docx_file, nrm(k))
@@ -156,7 +163,7 @@ def extraer_organolepticos(docx_file) -> list[pd.DataFrame]:
 archivo = st.file_uploader("📂 Sube la especificación (.docx)", type=["docx"])
 
 if archivo:
-    # Inciso 1
+    # 1) Descripción
     st.subheader("1) Descripción del Producto")
     descripcion = extraer_descripcion(archivo)
     if descripcion:
@@ -171,7 +178,7 @@ if archivo:
 
     st.markdown("---")
 
-    # Inciso 2
+    # 2) Composición
     st.subheader("2) Composición del Producto (%) e Ingredientes")
     df_comp, bloque_crudo = extraer_composicion(archivo)
     if not df_comp.empty:
@@ -187,18 +194,23 @@ if archivo:
 
     st.markdown("---")
 
-    # Inciso 3
+    # 3) Organolépticos
     st.subheader("3) Parámetros organolépticos (tabla)")
     organo_tabs = extraer_organolepticos(archivo)
     if not organo_tabs:
         st.warning("No se detectaron tablas en el inciso 3.")
     else:
         for i, df in enumerate(organo_tabs, 1):
+            # Limpia duplicados de encabezado (PARÁMETRO, ESPECIFICACIÓN, etc.)
+            df_clean = coalesce_by_stem(df, ["PARÁMETRO", "ESPECIFICACIÓN"])
+            keep = [c for c in ["PARÁMETRO", "ESPECIFICACIÓN"] if c in df_clean.columns]
+            if keep:
+                df_clean = df_clean[keep]
             st.caption(f"Tabla organolépticos {i}")
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df_clean, use_container_width=True)
             st.download_button(
                 f"⬇️ Descargar organolépticos {i} (CSV)",
-                data=df.to_csv(index=False).encode("utf-8"),
+                data=df_clean.to_csv(index=False).encode("utf-8"),
                 file_name=f"organolepticos_{i}.csv",
                 mime="text/csv",
                 key=f"dl_org_{i}"
