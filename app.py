@@ -1,118 +1,120 @@
 import streamlit as st
 import pandas as pd
+import re
+import unicodedata
+from collections import defaultdict
 from docx import Document
 
-st.set_page_config(page_title="Lector de Especificación (DOCX)", page_icon="📄", layout="wide")
-st.title("Paso 1 · Leer una especificación .docx (texto + tablas)")
+st.title("📄 Lector de Especificaciones Técnicas")
 
-archivo = st.file_uploader("📂 Sube la especificación en Word (.docx)", type=["docx"])
+# --- Funciones auxiliares ---
 
-def make_unique(cols):
-    """Evita encabezados duplicados: ['A','A','B'] -> ['A','A_1','B']"""
-    seen = {}
-    unique = []
-    for c in cols:
-        c = "" if c is None else str(c).strip()
-        if c in seen:
-            seen[c] += 1
-            unique.append(f"{c}_{seen[c]}")
+def _nrm(s: str) -> str:
+    if s is None: return ""
+    s = str(s).strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _base_name(col: str) -> str:
+    """Quita sufijos _1, _2… y normaliza tildes/espacios."""
+    c = _nrm(col)
+    c = re.sub(r"_(\d+)$", "", c)         # elimina sufijo _1, _2…
+    return c
+
+# Mapa de nombres bonitos
+PRETTY = {
+    "parametro": "PARÁMETRO",
+    "especificacion": "ESPECIFICACIÓN",
+    "condicion": "CONDICIÓN",
+    "metodo utilizado": "MÉTODO UTILIZADO",
+    "periodicidad de control": "PERIODICIDAD DE CONTROL",
+    "coa (si/no)": "CoA (Sí/No)",
+}
+
+# Sinónimos
+CANON = {
+    "parametro": ["parametro", "parámetro"],
+    "especificacion": ["especificacion", "especificación", "spec", "requisito", "valor"],
+    "condicion": ["condicion", "condición"],
+    "metodo utilizado": ["metodo utilizado", "metodo", "método", "method"],
+    "periodicidad de control": ["periodicidad de control", "frecuencia", "periodicidad"],
+    "coa (si/no)": ["coa (si/no)", "coa (sí/no)", "coa", "certificado de analisis"],
+}
+
+def _canon_key(base: str) -> str:
+    """Devuelve la clave canónica (parametro, especificacion, …) si matchea; si no, usa el base."""
+    for key, alts in CANON.items():
+        for a in alts:
+            if a in base:
+                return key
+    return base
+
+def coalesce_repeated_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Agrupa columnas por nombre base y hace 'primero no vacío' por fila."""
+    if df is None or df.empty:
+        return df
+
+    groups = defaultdict(list)
+    for col in df.columns:
+        base = _canon_key(_base_name(col))
+        groups[base].append(col)
+
+    out = pd.DataFrame(index=df.index)
+    for base, cols in groups.items():
+        if len(cols) == 1:
+            out[PRETTY.get(base, cols[0])] = df[cols[0]]
         else:
-            seen[c] = 0
-            unique.append(c)
-    return unique
+            merged = df[cols].replace({"": pd.NA}).bfill(axis=1).iloc[:, 0]
+            out[PRETTY.get(base, base.upper())] = merged.fillna("")
 
-def leer_docx(docx_file):
-    doc = Document(docx_file)
+    # quita columnas completamente vacías
+    keep = [c for c in out.columns if out[c].astype(str).str.strip().any()]
+    return out[keep]
 
-    # 1) Texto (párrafos)
-    parrafos = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
-
-    # 2) Tablas
-    tablas = []
+def read_docx_tables(path: str):
+    """Extrae todas las tablas de un .docx como dataframes."""
+    doc = Document(path)
+    tables = []
     for t in doc.tables:
-        filas = []
-        for r in t.rows:
-            celdas = []
-            for c in r.cells:
-                txt = " ".join(p.text for p in c.paragraphs).strip()
-                txt = " ".join(txt.split())  # colapsar espacios/saltos
-                celdas.append(txt)
-            filas.append(celdas)
+        data = []
+        for row in t.rows:
+            data.append([cell.text.strip() for cell in row.cells])
+        df = pd.DataFrame(data[1:], columns=data[0])
+        tables.append(df)
+    return tables
 
-        if not filas:
-            continue
+# --- Interfaz Streamlit ---
 
-        # Normalizar largo de filas (relleno con "")
-        max_cols = max(len(f) for f in filas)
-        filas = [f + [""] * (max_cols - len(f)) for f in filas]
+uploaded_file = st.file_uploader("📂 Sube una especificación técnica (.docx)", type=["docx"])
 
-        # Heurística simple: usar 1ª fila como encabezado
-        header = [str(x).strip() for x in filas[0]]
-        header_unique = make_unique(header)  # <<< CLAVE: volver únicos los encabezados
-        body = filas[1:] if len(filas) > 1 else []
-
-        if body:
-            df = pd.DataFrame(body, columns=header_unique)
-        else:
-            # Si solo hay 1 fila, igual devolvemos algo
-            df = pd.DataFrame(columns=header_unique)
-
-        tablas.append(df)
-
-    return parrafos, tablas
-
-if archivo:
-    st.success("✅ Archivo cargado")
-
+if uploaded_file:
     try:
-        parrafos, tablas = leer_docx(archivo)
+        tables = read_docx_tables(uploaded_file)
+        if not tables:
+            st.error("⚠️ No se detectaron tablas en el documento.")
+        else:
+            for i, df in enumerate(tables, start=1):
+                st.divider()
+                st.subheader(f"📊 Tabla {i}")
 
-        # Mostrar texto
-        st.subheader("📝 Texto (párrafos)")
-        st.write(f"Se detectaron **{len(parrafos)}** párrafos.")
-        with st.expander("Ver texto"):
-            for i, p in enumerate(parrafos, start=1):
-                st.markdown(f"**{i}.** {p}")
+                # Tabla original
+                st.caption("Versión original extraída")
+                st.dataframe(df, use_container_width=True)
 
-        # Mostrar tablas
-        st.subheader("📊 Tablas")
-        st.write(f"Se detectaron **{len(tablas)}** tablas.")
-        if not tablas:
-            st.info("No se detectaron tablas en este .docx.")
+                # Tabla unificada
+                clean_df = coalesce_repeated_columns(df)
+                st.caption("✅ Versión unificada (sin duplicados)")
+                st.dataframe(clean_df, use_container_width=True)
 
-        for i, df in enumerate(tablas, start=1):
-            st.caption(f"Tabla {i}")
-            st.dataframe(df, use_container_width=True)
-
-            # Opción manual: volver a aplicar encabezado con la 1ª fila del cuerpo
-            with st.expander(f"¿La primera fila REAL es la 2ª del archivo? (ajustar encabezado) · Tabla {i}"):
-                if st.checkbox(f"Usar segunda fila como encabezado (Tabla {i})", key=f"use_second_header_{i}"):
-                    if len(df) > 1:
-                        # Construir nuevo header con la primera fila actual de datos
-                        new_header = make_unique([str(x).strip() for x in df.iloc[0].tolist()])
-                        new_df = df.iloc[1:].copy()
-                        new_df.columns = new_header
-                        st.dataframe(new_df, use_container_width=True)
-                        # Botón de descarga de la versión ajustada
-                        st.download_button(
-                            label=f"⬇️ Descargar Tabla {i} (CSV) con encabezado ajustado",
-                            data=new_df.to_csv(index=False).encode("utf-8"),
-                            file_name=f"tabla_{i}_ajustada.csv",
-                            mime="text/csv",
-                            key=f"dl_adj_{i}"
-                        )
-
-            # Descarga CSV de la versión base
-            st.download_button(
-                label=f"⬇️ Descargar Tabla {i} (CSV)",
-                data=df.to_csv(index=False).encode("utf-8"),
-                file_name=f"tabla_{i}.csv",
-                mime="text/csv",
-                key=f"dl_{i}"
-            )
+                # Descarga
+                st.download_button(
+                    f"⬇️ Descargar Tabla {i} unificada (CSV)",
+                    data=clean_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"tabla_{i}_unificada.csv",
+                    mime="text/csv",
+                    key=f"dl_clean_{i}"
+                )
 
     except Exception as e:
         st.error(f"Error leyendo el DOCX: {e}")
-
-else:
-    st.info("Sube un archivo .docx para comenzar.")
