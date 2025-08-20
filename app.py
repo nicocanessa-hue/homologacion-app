@@ -1,6 +1,4 @@
-# app.py — Especificación · Incisos 1–6
-# 1) Descripción  2) Composición  3) Organolépticos  4) Físico‑químicos
-# 5) Microbiológicos  6) Empaque y Rotulado
+# app.py — Especificación · Incisos 1–6 (fix columnas duplicadas en inciso 5)
 
 import re
 import unicodedata
@@ -23,7 +21,6 @@ def nrm(s: str) -> str:
     return s.lower()
 
 def es_titulo_numerado(texto: str) -> bool:
-    # Encabezados del tipo: "1. ....", "2 ...."
     return bool(re.match(r"^\s*\d+(\.| )", texto or ""))
 
 def iter_block_items(parent):
@@ -51,6 +48,21 @@ def make_unique(cols):
             out.append(c)
     return out
 
+def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Asegura encabezados únicos (Col, Col_1, Col_2...)."""
+    new = []
+    seen = {}
+    for c in df.columns:
+        if c in seen:
+            seen[c] += 1
+            new.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            new.append(c)
+    df = df.copy()
+    df.columns = new
+    return df
+
 def table_rows(tbl: _Table):
     rows = []
     for r in tbl.rows:
@@ -61,6 +73,14 @@ def table_rows(tbl: _Table):
     max_cols = max(len(r) for r in rows)
     return [r + [""] * (max_cols - len(r)) for r in rows]
 
+def table_to_df(tbl: _Table) -> pd.DataFrame:
+    rows = table_rows(tbl)
+    if not rows: return pd.DataFrame()
+    header = make_unique(rows[0])
+    body = rows[1:] if len(rows) > 1 else []
+    df = pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
+    return dedupe_columns(df)
+
 def ffill_row(row):
     cur = ""
     out = []
@@ -69,13 +89,6 @@ def ffill_row(row):
         if x: cur = x
         out.append(cur)
     return out
-
-def table_to_df(tbl: _Table) -> pd.DataFrame:
-    rows = table_rows(tbl)
-    if not rows: return pd.DataFrame()
-    header = make_unique(rows[0])
-    body = rows[1:] if len(rows) > 1 else []
-    return pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
 
 def table_to_df_maybe_multihdr(tbl: _Table) -> pd.DataFrame:
     """Soporta header de 2 filas (p.ej., ESPECIFICACIÓN + MÍN/TARGET/MÁX o PLAN DE MUESTREO + n/c/m/M)."""
@@ -94,7 +107,8 @@ def table_to_df_maybe_multihdr(tbl: _Table) -> pd.DataFrame:
                 headers.append(f"{a.strip()}|{b.strip()}" if b.strip() else a.strip())
             headers = make_unique(headers)
             body = rows[2:] if len(rows) > 2 else []
-            return pd.DataFrame(body, columns=headers) if body else pd.DataFrame(columns=headers)
+            df = pd.DataFrame(body, columns=headers) if body else pd.DataFrame(columns=headers)
+            return dedupe_columns(df)
     return table_to_df(tbl)
 
 def extraer_bloque_por_titulo_parrafos(docx_file, contiene_titulo_norm: str) -> list[str]:
@@ -204,7 +218,6 @@ def normalize_fisicoquimicos(df):
 
     out = pd.DataFrame(index=df.index)
 
-    # MIN / TARGET / MAX (funciona con cabeceras compuestas "ESPECIFICACIÓN|min" o simples)
     c_min = pick_col(["|min", "|mín", " min", " mín", "min", "mín", "minimo", "mínimo"])
     c_tar = pick_col(["target", "objetivo"])
     c_max = pick_col(["|max", "|máx", " max", " máx", "max", "máx", "maximo", "máximo"])
@@ -228,7 +241,7 @@ def normalize_fisicoquimicos(df):
     order = [c for c in ["PARÁMETRO","MIN","TARGET","MAX","UNIDAD","MÉTODO UTILIZADO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"] if c in out.columns]
     out = out[order]
     out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
-    return out
+    return dedupe_columns(out)
 
 def extraer_fisicoquimicos(docx_file) -> list[pd.DataFrame]:
     for k in ["parámetros físico-químicos", "parametros fisico-quimicos", "parametros físico-químicos"]:
@@ -250,7 +263,6 @@ def normalize_microbiologicos(df: pd.DataFrame) -> pd.DataFrame:
     # Map flexible para columnas típicas
     map_cols = {}
     for c in df.columns:
-        cl = nrm(c)
         if has_token(c, ["parámetro","parametro","microorganismo"]): map_cols[c] = "PARÁMETRO"
         elif has_token(c, ["método","metodo","method"]):             map_cols[c] = "MÉTODO"
         elif has_token(c, ["grupo"]):                                map_cols[c] = "GRUPO"
@@ -259,26 +271,21 @@ def normalize_microbiologicos(df: pd.DataFrame) -> pd.DataFrame:
         elif has_token(c, ["|n", " n "]):                            map_cols[c] = "n"
         elif has_token(c, ["|c", " c "]):                            map_cols[c] = "c"
         elif has_token(c, ["|m", " m "]):                            map_cols[c] = "m"
-        elif has_token(c, ["|m ", "|M", " M "]):                     map_cols[c] = "M"   # segunda M en multihdr
+        elif has_token(c, ["|m ", "|M", " M "]):                     map_cols[c] = "M"
         elif has_token(c, ["límite","limite"]):                      map_cols[c] = "LÍMITE"
         elif has_token(c, ["periodicidad de control","frecuencia","periodicidad"]): map_cols[c] = "PERIODICIDAD DE CONTROL"
         elif has_token(c, ["coa"]):                                  map_cols[c] = "CoA (Sí/No)"
 
     df2 = df.rename(columns=map_cols)
 
-    # A veces 'm' y 'M' vienen dentro de 'LÍMITE (m;M)' en una sola columna → intentar dividir si hay patrón "m … M …"
+    # m/M dentro de "LÍMITE (m;M)" -> extraer si faltan
     if "LÍMITE" in df2.columns and ("m" not in df2.columns or "M" not in df2.columns):
         lim = df2["LÍMITE"].astype(str)
-        # patrones simples: "m 0  M 100" / "m=0; M=100"
-        m_vals = lim.str.extract(r"[mM]\s*[:=]?\s*([0-9]+(?:[.,][0-9]+)?)", expand=False)
-        M_vals = lim.str.extract(r"[;,\s][mM]\s*[:=]?\s*([0-9]+(?:[.,][0-9]+)?)$", expand=False)
-        # fallback si orden invertido
-        M_first = lim.str.extract(r"[M]\s*[:=]?\s*([0-9]+(?:[.,][0-9]+)?)", expand=False)
-        m_first = lim.str.extract(r"[m]\s*[:=]?\s*([0-9]+(?:[.,][0-9]+)?)", expand=False)
-        df2["m"] = df2.get("m", m_first).fillna(m_vals)
-        df2["M"] = df2.get("M", M_first).fillna(M_vals)
+        m_vals = lim.str.extract(r"[m]\s*[:=]?\s*([0-9]+(?:[.,][0-9]+)?)", expand=False)
+        M_vals = lim.str.extract(r"[M]\s*[:=]?\s*([0-9]+(?:[.,][0-9]+)?)", expand=False)
+        if "m" not in df2.columns: df2["m"] = m_vals
+        if "M" not in df2.columns: df2["M"] = M_vals
 
-    # Ordenar/limpiar
     order = ["PARÁMETRO","MÉTODO","GRUPO","CATEGORÍA","CLASE","n","c","m","M","LÍMITE","PERIODICIDAD DE CONTROL","CoA (Sí/No)"]
     keep = [c for c in order if c in df2.columns]
     out = df2[keep].copy()
@@ -286,7 +293,7 @@ def normalize_microbiologicos(df: pd.DataFrame) -> pd.DataFrame:
         if k in out.columns:
             out[k] = out[k].replace({"-": "", "–": ""})
     out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
-    return out
+    return dedupe_columns(out)
 
 def extraer_microbiologicos(docx_file) -> list[pd.DataFrame]:
     keys = ["parámetros microbiológicos","parametros microbiologicos","microbiologicos"]
@@ -303,7 +310,6 @@ ETI_KEYS = [
 ]
 
 def parse_key_value_lines(lines: list[str]) -> pd.DataFrame:
-    """Convierte líneas del tipo 'Clave: Valor' en una tabla."""
     rows = []
     for ln in lines:
         m = re.match(r"\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-/().% 0-9]+?)\s*[:：]\s*(.+)$", ln)
@@ -312,26 +318,22 @@ def parse_key_value_lines(lines: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def extraer_empaque_rotulado(docx_file) -> pd.DataFrame:
-    # 1) intento: tablas bajo el título
     for key in ETI_KEYS:
         tablas = extraer_bloque_mixto_tablas(docx_file, nrm(key), multihdr=False)
         if tablas:
-            # concatenar y normalizar cabeceras duplicadas
             dfs = []
             for t in tablas:
                 t = t.loc[:, ~t.columns.duplicated()]
                 dfs.append(t)
             cat = pd.concat(dfs, ignore_index=True)
-            return cat
+            return dedupe_columns(cat)
 
-    # 2) si no hay tablas → recoger párrafos (clave:valor)
     for key in ETI_KEYS:
         bloque = extraer_bloque_por_titulo_parrafos(docx_file, nrm(key))
         if bloque:
             kv = parse_key_value_lines(bloque)
             if not kv.empty:
-                return kv
-            # si no hay clave:valor, devolver texto crudo en una sola fila
+                return dedupe_columns(kv)
             return pd.DataFrame([{"Campo":"Texto", "Valor":" ".join(bloque)}])
     return pd.DataFrame()
 
@@ -344,6 +346,7 @@ if archivo:
     desc = extraer_descripcion(archivo)
     if desc:
         df_desc = pd.DataFrame([{"Campo":"Descripción del Producto","Valor":desc}])
+        df_desc = dedupe_columns(df_desc)
         st.table(df_desc)
         st.download_button("⬇️ Descargar descripción (CSV)", df_desc.to_csv(index=False).encode("utf-8"), "descripcion.csv", "text/csv")
     else:
@@ -355,6 +358,7 @@ if archivo:
     st.subheader("2) Composición del Producto (%) e Ingredientes")
     df_comp, bloque_crudo = extraer_composicion(archivo)
     if not df_comp.empty:
+        df_comp = dedupe_columns(df_comp)
         st.table(df_comp)
         st.download_button("⬇️ Descargar composición (CSV)", df_comp.to_csv(index=False).encode("utf-8"), "composicion.csv", "text/csv")
     else:
@@ -375,6 +379,7 @@ if archivo:
             df_clean = coalesce_by_stem(df, ["PARÁMETRO","ESPECIFICACIÓN"])
             keep = [c for c in ["PARÁMETRO","ESPECIFICACIÓN"] if c in df_clean.columns]
             if keep: df_clean = df_clean[keep]
+            df_clean = dedupe_columns(df_clean)
             st.caption(f"Tabla organolépticos {i}")
             st.dataframe(df_clean, use_container_width=True)
             st.download_button(f"⬇️ Descargar organolépticos {i} (CSV)",
@@ -390,6 +395,7 @@ if archivo:
         st.info("No se detectaron tablas en el inciso 4.")
     else:
         for i, df in enumerate(fisq_tabs, 1):
+            df = dedupe_columns(df)
             st.caption(f"Tabla físico‑químicos {i}")
             st.dataframe(df, use_container_width=True)
             st.download_button(f"⬇️ Descargar físico‑químicos {i} (CSV)",
@@ -405,6 +411,7 @@ if archivo:
         st.info("No se detectaron tablas en el inciso 5.")
     else:
         for i, df in enumerate(micro_tabs, 1):
+            df = dedupe_columns(df)
             st.caption(f"Tabla microbiológicos {i}")
             st.dataframe(df, use_container_width=True)
             st.download_button(f"⬇️ Descargar microbiológicos {i} (CSV)",
@@ -417,6 +424,7 @@ if archivo:
     st.subheader("6) Empaque y rotulado")
     emp_df = extraer_empaque_rotulado(archivo)
     if emp_df is not None and not emp_df.empty:
+        emp_df = dedupe_columns(emp_df)
         st.dataframe(emp_df, use_container_width=True)
         st.download_button("⬇️ Descargar empaque/rotulado (CSV)",
                            emp_df.to_csv(index=False).encode("utf-8"),
