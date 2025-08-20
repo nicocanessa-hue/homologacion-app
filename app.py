@@ -1,13 +1,14 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import re, unicodedata
 from collections import defaultdict
 from docx import Document
 
-st.set_page_config(page_title="Especificación: lector DOCX", page_icon="📄", layout="wide")
-st.title("📄 Lector de Especificaciones con encabezado multinivel (DOCX)")
+st.set_page_config(page_title="Especificaciones · Lector DOCX Pro", page_icon="📄", layout="wide")
+st.title("📄 Lector de Especificaciones (DOCX) con encabezados multinivel")
 
-# ----------------- utilidades -----------------
+# ----------------- helpers de texto/encabezados -----------------
 def nrm(s):
     if s is None: return ""
     s = str(s).strip().lower()
@@ -29,43 +30,37 @@ def make_unique(cols):
     return out
 
 def ffill_row(row):
-    """forward-fill en una lista (para celdas combinadas que quedan vacías)"""
     cur = ""
     out = []
     for x in row:
-        if str(x).strip() != "":
-            cur = str(x).strip()
+        x = "" if x is None else str(x).strip()
+        if x != "":
+            cur = x
         out.append(cur)
     return out
 
-def build_header_two_rows(rows):
+def build_header_multirows(rows, max_header_rows=4):
     """
-    Usa las dos primeras filas como encabezado multinivel.
-    - Hace forward-fill en cada fila.
-    - Concatena como 'Top|Sub' si el Sub es significativo (min/target/max).
+    Construye encabezados combinando hasta 'max_header_rows' filas superiores.
+    Concatena niveles como: Top|Sub|Subsub
     """
-    if len(rows) < 2:
-        hdr = [str(x).strip() for x in rows[0]]
-        return make_unique(hdr), 1  # header, body_start
+    header_rows = rows[:max_header_rows]
+    ffilled = [ffill_row(r) for r in header_rows]
 
-    top = ffill_row(rows[0])
-    sub = ffill_row(rows[1])
-
+    # Combina por columna
     headers = []
-    for a, b in zip(top, sub):
-        a_clean = str(a).strip()
-        b_clean = str(b).strip()
-        # si sub encabezado parece 'min/target/max', lo incluimos
-        if nrm(b_clean) in {"min", "mín", "minimo", "target", "max", "máx", "maximo"}:
-            headers.append(f"{a_clean}|{b_clean}")
-        else:
-            headers.append(a_clean)
+    for col in zip(*ffilled):
+        parts = [p for p in col if p]  # solo no vacíos
+        header = "|".join(parts) if parts else ""
+        headers.append(header)
 
     headers = make_unique(headers)
-    return headers, 2  # header, body_start
+    return headers, len(header_rows)
 
-# mapeo a nombres finales
+# ----------------- normalización de columnas -----------------
+# Mapa a nombres finales “bonitos”
 PRETTY = {
+    # Físico-químicos
     "parametro": "PARÁMETRO",
     "especificacion|min": "MIN",
     "especificacion|mín": "MIN",
@@ -77,42 +72,61 @@ PRETTY = {
     "metodo utilizado": "MÉTODO UTILIZADO",
     "periodicidad de control": "PERIODICIDAD DE CONTROL",
     "coa (si/no)": "CoA (Sí/No)",
+
+    # Microbiológicos (deja como está si no mapea)
+    "metodo": "MÉTODO",
+    "grupo": "GRUPO",
+    "plan de muestreo|categoria": "PLAN DE MUESTREO|Categoría",
+    "plan de muestreo|clase": "PLAN DE MUESTREO|Clase",
+    "plan de muestreo|n": "PLAN DE MUESTREO|n",
+    "plan de muestreo|c": "PLAN DE MUESTREO|c",
+    "limite|m": "LÍMITE|m",
+    "limite|m.": "LÍMITE|m",
+    "limite|max": "LÍMITE|M",
+    "limite|m_": "LÍMITE|m",
+    "limite|m mayus": "LÍMITE|M",
 }
 
-# sinónimos para agrupar
+# Aliases para reconocer variantes/español-inglés
 ALIASES = {
     "parametro": ["parametro", "parámetro"],
-    "especificacion": ["especificacion", "especificación", "spec"],
+    "especificacion": ["especificacion", "especificación", "spec", "requisito", "valor"],
     "unidad": ["unidad", "unit", "units"],
-    "metodo utilizado": ["metodo utilizado","metodo","método","method"],
-    "periodicidad de control": ["periodicidad de control","frecuencia","periodicidad"],
-    "coa (si/no)": ["coa (si/no)","coa (sí/no)","coa"],
-    # subheaders:
-    "min": ["min","mín","minimo"],
-    "target": ["target"],
-    "max": ["max","máx","maximo"],
+    "metodo utilizado": ["metodo utilizado", "metodo", "método", "method"],
+    "periodicidad de control": ["periodicidad de control", "frecuencia", "periodicidad"],
+    "coa (si/no)": ["coa (si/no)", "coa (sí/no)", "coa"],
+
+    # Micro
+    "metodo": ["metodo", "método", "method"],
+    "grupo": ["grupo", "group"],
+    "plan de muestreo": ["plan de muestreo", "sampling plan", "plan muestreo", "plan"],
+    "categoria": ["categoria", "categoría", "category"],
+    "clase": ["clase", "class"],
+    "limite": ["limite", "límite", "limit"],
+    "m": ["m"],
+    "max": ["m", "m "],  # algunos documentos ponen 'M' en mayúscula; lo resolveremos abajo
+    "n": ["n"],
+    "c": ["c"],
 }
 
+def canon_part(token):
+    t = nrm(token)
+    for key, alts in ALIASES.items():
+        for a in alts:
+            if nrm(a) == t:
+                return key
+    return t
+
 def canon_key(header):
-    """Convierte 'ESPECIFICACIÓN|MÍN' -> 'especificacion|min' (canónico) para mapear a PRETTY."""
-    h = nrm(header)
-    parts = [p.strip() for p in h.split("|")]
-    mapped = []
-    for p in parts:
-        hit = p
-        for k, alts in ALIASES.items():
-            if any(nrm(a) == p for a in alts):
-                hit = k
-                break
-        mapped.append(hit)
+    """'ESPECIFICACIÓN|MÍN' -> 'especificacion|min' (clave canónica)"""
+    parts = [p for p in header.split("|") if p]
+    mapped = [canon_part(p) for p in parts]
     return "|".join(mapped)
 
-def normalize_multilevel_df(df):
+def coalesce_groups(df, name_map=PRETTY):
     """
-    - Agrupa columnas por clave canónica (p. ej. todas las variantes de 'ESPECIFICACIÓN|MÍN').
-    - Coalesce por fila (primer no vacío).
-    - Renombra a PRETTY (MIN, TARGET, MAX, etc.).
-    - Devuelve sólo columnas relevantes.
+    Agrupa columnas por 'canon_key' y hace coalesce por fila (primer no vacío).
+    Renombra con PRETTY si aplica.
     """
     if df is None or df.empty:
         return df
@@ -123,38 +137,47 @@ def normalize_multilevel_df(df):
 
     out = pd.DataFrame(index=df.index)
 
-    # Coalesce por grupo
     for key, cols in groups.items():
         merged = df[cols].replace({"": pd.NA}).bfill(axis=1).iloc[:, 0]
-        final_name = PRETTY.get(key, None)
-        if final_name is None:
-            # si es 'especificacion' sin subheader no la usamos (porque nos interesan MIN/TARGET/MAX)
+        final = name_map.get(key, None)
+        if final is None:
+            # si es 'especificacion' sin subclave, no añadir (preferimos MIN/TARGET/MAX)
             if key.startswith("especificacion|"):
-                base = key.split("|")[-1].upper()
-                final_name = base
+                sub = key.split("|")[-1].upper()
+                final = sub
             else:
-                # deja cualquier otra columna con su nombre original (bonito)
-                final_name = cols[0]
-        out[final_name] = merged.fillna("")
+                final = cols[0]
+        out[final] = merged.fillna("")
 
-    # Intentamos encontrar columna PARÁMETRO aunque llegue con variantes
+    # Fallback para PARÁMETRO si no lo detectó
     if "PARÁMETRO" not in out.columns:
         for c in list(out.columns):
-            if nrm(c) in ("parametro","parámetro"):
+            if nrm(c) in ("parametro", "parámetro"):
                 out.rename(columns={c: "PARÁMETRO"}, inplace=True)
 
-    # Orden sugerido
-    order = [c for c in ["PARÁMETRO","MIN","TARGET","MAX","UNIDAD","MÉTODO UTILIZADO","PERIODICIDAD DE CONTROL","CoA (Sí/No)"] if c in out.columns]
-    # añade el resto al final
-    rest = [c for c in out.columns if c not in order]
-    out = out[order + rest]
+    # Orden sugerido si existen
+    pref_order = [
+        "PARÁMETRO", "MIN", "TARGET", "MAX",
+        "UNIDAD", "MÉTODO UTILIZADO", "MÉTODO",
+        "GRUPO",
+        "PLAN DE MUESTREO|Categoría", "PLAN DE MUESTREO|Clase",
+        "PLAN DE MUESTREO|n", "PLAN DE MUESTREO|c",
+        "LÍMITE|m", "LÍMITE|M",
+        "PERIODICIDAD DE CONTROL", "CoA (Sí/No)"
+    ]
+    ordered = [c for c in pref_order if c in out.columns]
+    rest = [c for c in out.columns if c not in ordered]
+    out = out[ordered + rest]
 
-    # Filtra filas completamente vacías
-    out = out[ out.apply(lambda r: r.astype(str).str.strip().any(), axis=1) ].reset_index(drop=True)
+    # Elimina filas completamente vacías
+    out = out[out.apply(lambda r: r.astype(str).str.strip().any(), axis=1)].reset_index(drop=True)
     return out
 
-def read_docx_tables(file):
-    """Extrae todas las tablas de un .docx como DataFrames, soportando encabezado de 2 filas."""
+# ----------------- lectura de DOCX a DataFrames -----------------
+def read_docx_tables(file, max_header_rows=4):
+    """
+    Extrae todas las tablas del .docx como DataFrames, soportando encabezados de múltiple nivel.
+    """
     doc = Document(file)
     tables = []
     for t in doc.tables:
@@ -166,16 +189,17 @@ def read_docx_tables(file):
                 txt = " ".join(txt.split())
                 cells.append(txt)
             rows.append(cells)
-        if not rows: 
+        if not rows:
             continue
 
-        # normalizar ancho
+        # normaliza ancho
         max_cols = max(len(r) for r in rows)
         rows = [r + [""] * (max_cols - len(r)) for r in rows]
 
-        # header multinivel (2 filas)
-        header, body_start = build_header_two_rows(rows)
+        # encabezado multinivel
+        header, body_start = build_header_multirows(rows, max_header_rows=max_header_rows)
         body = rows[body_start:] if len(rows) > body_start else []
+
         df = pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
         tables.append(df)
     return tables
@@ -185,7 +209,7 @@ docx_file = st.file_uploader("📂 Sube la especificación (.docx)", type=["docx
 
 if docx_file:
     try:
-        raw_tables = read_docx_tables(docx_file)
+        raw_tables = read_docx_tables(docx_file, max_header_rows=4)
         if not raw_tables:
             st.warning("No se detectaron tablas en el documento.")
         for i, raw in enumerate(raw_tables, start=1):
@@ -195,8 +219,8 @@ if docx_file:
             st.caption("Encabezado multinivel detectado (original)")
             st.dataframe(raw, use_container_width=True)
 
-            st.caption("✅ Normalizada (PARÁMETRO / MIN / TARGET / MAX / UNIDAD / ...)")
-            clean = normalize_multilevel_df(raw)
+            st.caption("✅ Normalizada / fusionada (óptima para checklist)")
+            clean = coalesce_groups(raw)
             st.dataframe(clean, use_container_width=True)
 
             st.download_button(
@@ -206,6 +230,7 @@ if docx_file:
                 mime="text/csv",
                 key=f"dl_norm_{i}"
             )
+
     except Exception as e:
         st.error(f"Error leyendo el DOCX: {e}")
 else:
